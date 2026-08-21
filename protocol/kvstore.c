@@ -5,8 +5,12 @@
 #include"kvstore.h"
 #include"server.h"
 #include"kv_array.h"
+#include"kv_hash.h"
+#include"kv_rbtree.h"
 #define KV_MAX_TOKENS 8
 kv_array_t global_array;
+KV_Map global_hash;
+KV_Rbtree global_rbtree;
 const char *command[]={
     "SET","GET","DEL","MOD","EXIST"
 };
@@ -64,7 +68,13 @@ int kv_filter_protocol(char **tokens,int count,char *response){
     int length=0;
     switch(cmd){
         case KV_CMD_SET:
+            #if ENGINE==ENGINE_ARRAY
             ret=kv_array_set(&global_array,key,value);
+            #elif ENGINE==ENGINE_HASH
+            ret=KV_Map_set(&global_hash,key,value);
+            #elif ENGINE==ENGINE_RBTREE
+            ret=KV_Rbtree_set(&global_rbtree,key,value);
+            #endif
             if(ret==0){
                 length=sprintf(response,"OK\r\n");
             }else if(ret>0){
@@ -74,7 +84,13 @@ int kv_filter_protocol(char **tokens,int count,char *response){
             }
             break;
         case KV_CMD_GET:
+            #if ENGINE==ENGINE_ARRAY
             char *v=kv_array_get(&global_array,key);
+            #elif ENGINE==ENGINE_HASH
+            char *v=KV_Map_get(&global_hash,key);
+            #elif ENGINE==ENGINE_RBTREE
+            char *v =KV_Rbtree_get(&global_rbtree,key);
+            #endif
             if(v==NULL){
                 length=sprintf(response,"NO EXIST\r\n");
             }else{
@@ -82,7 +98,13 @@ int kv_filter_protocol(char **tokens,int count,char *response){
             }
             break;
         case KV_CMD_DEL:
+            #if ENGINE==ENGINE_ARRAY
             ret=kv_array_del(&global_array,key);
+            #elif ENGINE==ENGINE_HASH
+            ret=KV_Map_del(&global_hash,key);
+            #elif ENGINE==ENGINE_RBTREE
+            ret=KV_Rbtree_del(&global_rbtree,key);
+            #endif
             if(ret==0){
                 length=sprintf(response,"OK\r\n");
             }else if(ret>0){
@@ -92,7 +114,13 @@ int kv_filter_protocol(char **tokens,int count,char *response){
             }
             break;
         case KV_CMD_MOD:
+            #if ENGINE==ENGINE_ARRAY
             ret=kv_array_mod(&global_array,key,value);
+            #elif ENGINE==ENGINE_HASH
+            ret=KV_Map_mod(&global_hash,key,value);
+            #elif ENGINE==ENGINE_RBTREE
+            ret=KV_Rbtree_mod(&global_rbtree,key,value);
+            #endif
             if(ret==0){
                 length=sprintf(response,"OK\r\n");
             }else if(ret>0){
@@ -102,7 +130,13 @@ int kv_filter_protocol(char **tokens,int count,char *response){
             }
             break;
         case KV_CMD_EXIST:
+            #if ENGINE==ENGINE_ARRAY
             ret=kv_array_exist(&global_array,key);
+            #elif ENGINE==ENGINE_HASH
+            ret=KV_Map_exist(&global_hash,key);
+            #elif ENGINE==ENGINE_RBTREE
+            ret=KV_Rbtree_exist(&global_rbtree,key);
+            #endif
             if(ret>0){
                 length=sprintf(response,"EXIST\r\n");
             }else if(ret==0){
@@ -135,11 +169,25 @@ int kv_response(struct conn*c){
     c->status=0;
 }
 void init_kvengine(void){
+    #if ENGINE==ENGINE_ARRAY
     memset(&global_array,0,sizeof(kv_array_t));
     kv_array_create(&global_array);
+    #elif ENGINE==ENGINE_HASH
+    memset(&global_hash,0,sizeof(KV_Map));
+    KV_Map_create(&global_hash);
+    #elif ENGINE==ENGINE_RBTREE
+    memset(&global_rbtree,0,sizeof(KV_Rbtree));
+    KV_Rbtree_create(&global_rbtree);
+    #endif
 }
 void dest_kvengine(void){
+    #if ENGINE==ENGINE_ARRAY
     kv_array_destory(&global_array);
+    #elif ENGINE==ENGINE_HASH
+    KV_Map_destory(&global_hash);
+    #elif ENGINE==ENGINE_RBTREE
+    KV_Rbtree_destory(&global_rbtree);
+    #endif
 }
 int main(int argc,char *argv[]){
     if(argc!=2) return -1;

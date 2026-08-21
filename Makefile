@@ -1,7 +1,9 @@
 CC=gcc
 SRCS=protocol/kvstore.c engine/kv_array.c network/reactor.c network/uring_tcp_server.c nytco.c \
 	 network/nytco/coroutine.c  network/nytco/ctx_switch.S \
-	 network/nytco/rbtree.c 
+	 network/nytco/rbtree.c \
+	 engine/kv_hash.c \
+	 engine/kv_rbtree.c
 TARGET=kvstore
 CFLAGS= -I/home/snow/share/KV_STORE/lib/liburing/src/include -I/home/snow/share/KV_STORE/network/nytco \
 	-D_GNU_SOURCE \
