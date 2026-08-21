@@ -1,8 +1,26 @@
+# *.o
+# *.a
+# kvstore
+# testcase
+# test_net
+# *.so
+# *.swp
+# *.tmp
+# 目标文件、静态库、动态库
 *.o
 *.a
+*.so
+
+# 可执行程序（编译产物）
 kvstore
 testcase
 test_net
-*.so
+engine/kv_hash_test
+engine/kv_rbtree
+network/nytco/server
+network/nytco/test_ctx
+
+# 临时文件
 *.swp
 *.tmp
+*.log
