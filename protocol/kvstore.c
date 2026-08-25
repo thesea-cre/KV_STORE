@@ -7,6 +7,7 @@
 #include"kv_array.h"
 #include"kv_hash.h"
 #include"kv_rbtree.h"
+#include"mempool.h"
 #define KV_MAX_TOKENS 8
 kv_array_t global_array;
 KV_Map global_hash;
@@ -27,11 +28,20 @@ enum{
     
     KV_CMD_COUNT
 };
+static Mempool_Manager *msg;
 void *kv_malloc(size_t size){//用的很多的系统函数最好包装一层，为了修改方便
+    #if 0
     return malloc(size);
+    #else 
+    return Managerpool_Alloc(msg,size);
+    #endif
 }
 void kv_free(void* ptr){
+    #if 0
     return free(ptr);
+    #else
+    return Managerpool_free(msg,ptr);
+    #endif
 }
 int kv_split_token(char *msg,char* tokens[]){
     if(msg==NULL||tokens==NULL) return -1;
@@ -191,6 +201,9 @@ void dest_kvengine(void){
 }
 int main(int argc,char *argv[]){
     if(argc!=2) return -1;
+    #if 1
+    msg=Managerpool_GetInstance();
+    #endif
     unsigned int port=atoi(argv[1]);
     init_kvengine();
     #if NETWORK_SELECT == ENABLE_REACTOR

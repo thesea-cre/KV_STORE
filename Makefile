@@ -3,13 +3,14 @@ SRCS=protocol/kvstore.c engine/kv_array.c network/reactor.c network/uring_tcp_se
 	 network/nytco/coroutine.c  network/nytco/ctx_switch.S \
 	 network/nytco/rbtree.c \
 	 engine/kv_hash.c \
-	 engine/kv_rbtree.c
+	 engine/kv_rbtree.c \
+	 mempool/mempool.c
 TARGET=kvstore
 CFLAGS= -I/home/snow/share/KV_STORE/lib/liburing/src/include -I/home/snow/share/KV_STORE/network/nytco \
 	-D_GNU_SOURCE \
 	-mcmodel=large \
 	-I/home/snow/share/KV_STORE/include 
-LDFLAGS= -L/home/snow/share/KV_STORE/lib/liburing/src -luring -ldl
+LDFLAGS= -L/home/snow/share/KV_STORE/lib/liburing/src -luring -ldl -lpthread
 TESTCASE_SRC=testcase.c 
 TESTCASE=testcase
 OBJS := $(SRCS:.c=.o)
