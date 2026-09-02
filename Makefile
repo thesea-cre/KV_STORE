@@ -4,7 +4,8 @@ SRCS=protocol/kvstore.c engine/kv_array.c network/reactor.c network/uring_tcp_se
 	 network/nytco/rbtree.c \
 	 engine/kv_hash.c \
 	 engine/kv_rbtree.c \
-	 mempool/mempool.c
+	 mempool/mempool.c \
+	 protocol/kvproto.c
 TARGET=kvstore
 CFLAGS= -I/home/snow/share/KV_STORE/lib/liburing/src/include -I/home/snow/share/KV_STORE/network/nytco \
 	-D_GNU_SOURCE \

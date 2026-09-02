@@ -160,27 +160,16 @@ int send_cb(int fd,void *arg){
         }else{
             INFO("server send to clientd:( %s)   %d(bytes)\n",connection[fd].wbuffer,set);
             connection[fd].wlength -= set;
-            // if(connection[fd].wlength!=0){
-            //     status=1;
-            //     set_event(fd,EPOLLOUT);
-            // }
             set_event(fd,EPOLLOUT);
         }
     }else if(connection[fd].status==2){//三个状态具体怎么发送，业务层去管怎么发送
-        // if(connection[fd].wlength!=0){
-        //         status=1;
-        //         set_event(fd,EPOLLOUT);
-        //     }
-        // else{
-        //     status=2;
-        //     set_event(fd,EPOLLOUT);
-        // }
-        set_event(fd,EPOLLOUT);
+        set=send(fd,connection[fd].wbuffer,connection[fd].wlength,0);
+        set_event(fd,EPOLLIN);
 
     }else if(connection[fd].status==0){
         if (connection[fd].wlength != 0) {
                 set= send(fd,connection[fd].wbuffer,connection[fd].wlength,0);
-                INFO("server send to clientd:( %s)   %d(bytes)\n",connection[fd].wbuffer,set);
+                INFO("server send to clientd:(%s)   %d(bytes)\n",connection[fd].wbuffer,set);
             }
         set_event(fd,EPOLLIN);
     }

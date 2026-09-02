@@ -3,12 +3,6 @@
 #include<stdio.h>
 #include<stdlib.h>
 #include<string.h>
-// void *kv_malloc(size_t size){//用的很多的系统函数最好包装一层，为了修改方便
-//     return malloc(size);
-// }
-// void kv_free(void* ptr){
-//     return free(ptr);
-// }
 int kv_array_create(kv_array_t *init){
     if(init==NULL){
         //printf("kv_array_create\n");
