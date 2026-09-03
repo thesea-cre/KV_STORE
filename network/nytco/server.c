@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include "coroutine.h" // 你的协程库头文件
 #include<sys/time.h>
+#include"server.h"
 #define PORT 2000
 #define BUF_SIZE 1024
 #define MAX_CLIENT_NUM 1048576
@@ -21,12 +22,18 @@ void client_handler(void* arg) {
     char buf[BUF_SIZE];
     while (1) {
         // 调用Hook后的recv，阻塞时自动让出CPU
-        ssize_t n = recv(fd, buf, BUF_SIZE, 0);
+        ssize_t n = co_recv(fd, buf, BUF_SIZE, 0);
+        #if ENABLEKV
+        struct result res;
+        kv_request(buf,n,&res);
+        memset(buf,0,BUF_SIZE);
+        n=kv_response(buf,BUF_SIZE,&res);
+        #endif
         if (n <= 0) {
             break;
         }
        // printf("recv from client:%s,%ld(bytes)\n",buf,n);//业务执行完返回一个值，拿这个值去判断执行完没有
-        send(fd, buf, n, 0);
+        co_send(fd, buf, n, 0);
     }
     // struct rb_node* node = rb_find(&tls_sched->rb_wait, &fd, cmp_fd_key);
     // if (node) {
@@ -47,10 +54,9 @@ void accept_worker(void* arg) {
     free(arg);
     struct sockaddr_in client_addr;
     socklen_t len = sizeof(client_addr);
-
     while (1) {
         // Hook后的accept，无连接时自动让出
-        int conn_fd = accept(listen_fd, (struct sockaddr*)&client_addr, &len);
+        int conn_fd = co_accept(listen_fd, (struct sockaddr*)&client_addr, &len);
         if (conn_fd < 0) {
             perror("accept");
             continue;
@@ -75,7 +81,7 @@ void accept_worker(void* arg) {
     
 }
 
-int main() {
+int nytco(unsigned int port) {
     hook_init();
     tls_sched=sched_create();
     for(int i=0;i<PORT_NUM;i++){
@@ -91,7 +97,7 @@ int main() {
 
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(PORT+i);
+    addr.sin_port = htons(port+i);
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
     if (bind(listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
@@ -111,6 +117,7 @@ int main() {
     INFO("exit create_cor\n");
 	gettimeofday(&tv_begin, NULL);
     }
+
     // 创建调度器并启动
     
     printf("sched_loop\n");

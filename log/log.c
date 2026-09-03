@@ -57,10 +57,10 @@ void log_write(log_level_t lev,const char *file,int line,const char *fmt,...){
     fflush(log_fp);
     pthread_mutex_unlock(&log_mutex);
 }
-int main(){
-    log_init("logfile",LOG_INFO);
-    LOG_INFO("alloc size=%zu",128);
-    log_close();
-    return 0;
-}
+// int main(){
+//     log_init("logfile",LOG_INFO);
+//     LOG_INFO("alloc size=%zu",128);
+//     log_close();
+//     return 0;
+// }
 

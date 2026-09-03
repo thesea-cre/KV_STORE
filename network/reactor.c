@@ -8,7 +8,7 @@
 #include<netinet/in.h>
 #include<arpa/inet.h>
 #include<sys/time.h>
-#include"server.h"
+#include"reactor.h"
 int epfd;//定义一个全局的epoll，
 int accept_cb(int fd,void *arg);
 int recv_cb(int fd,void *arg);
@@ -128,7 +128,7 @@ int recv_cb(int fd,void *arg){
         connection[fd].rlength=ret;
         INFO("recv from clientfd:clientfd--> %d,buffer-->%s\n",fd,connection[fd].rbuffer);
         #if ENABLEKV
-        kv_request(&connection[fd]);
+        kv_request(connection[fd].rbuffer,connection[fd].rlength,&connection[fd].res);
         #endif
         set_event(fd,EPOLLOUT);
         return 0;
@@ -136,7 +136,7 @@ int recv_cb(int fd,void *arg){
 }
 int send_cb(int fd,void *arg){
     #if ENABLEKV
-    kv_response(&connection[fd]);
+    connection[fd].wlength=kv_response(connection[fd].wbuffer,BUFFER_SIZE,&connection[fd].res);
     #endif
     #if TEST100w
     memcpy(connection[fd].wbuffer,connection[fd].rbuffer,connection[fd].rlength);
@@ -173,7 +173,6 @@ int send_cb(int fd,void *arg){
             }
         set_event(fd,EPOLLIN);
     }
-
 }
 typedef struct reactor_arg{
     int fd;

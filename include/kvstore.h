@@ -15,14 +15,13 @@
 #include"server.h"
 //int kv_protocol(char *msg,int length,char *request);//解析协议函数，通过调用kv_split_token解析字符，然后再调用kv_filter_protocol，根据内容填充response
 int kv_split_token(char *msg,char* tokens[]);
-int kv_protocol(struct conn*c);
+int kv_protocol(char *msg,int len,result*c);
 int kv_filter_protocol(char **token,int count,char *response);
 void *kv_malloc(size_t size);
 void kv_free(void* ptr);
 extern int reactor_entry(unsigned int port);
 extern int uring_start(unsigned int port);
 extern int nytco(unsigned int port);
-
 enum{
     KV_CMD_START,
     KV_CMD_SET=KV_CMD_START,

@@ -100,4 +100,7 @@ static inline int setnonblock(int fd){
     if(flags<0) return -1;
     return fcntl(fd,F_SETFL,flags|O_NONBLOCK);
 }
+int co_accept(int fd, struct sockaddr* addr, socklen_t* addrlen);
+ssize_t co_recv(int fd, void *buffer, size_t len, int flag);
+ssize_t co_send(int fd,const void *buffer,size_t len,int flag);
 #endif // COROUTINE_H

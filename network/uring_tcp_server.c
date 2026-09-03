@@ -12,18 +12,24 @@
 #define EVENT_SEND 1
 #define EVENT_ACCEPT 2
 #define ENTRIES_LENGTH 1024
-int fd_register(int fd,int flag);
-int uring_recv_cb(int fd,void *arg);
-int uring_send_cb(int fd,void *arg);
-int uring_accept_cb(int fd,void *arg);
+#define BUFFER_SIZE 1024
+#define MAX_CONNECT 1024
+// int uring_recv_cb(int fd,void *arg);
+// int uring_send_cb(int fd,void *arg);
+// int uring_accept_cb(int fd,void *arg);
 static struct timeval begin;
-#if 1
-static struct conn connection[CONNECTION_SIZE]={0};//可以理解为一个fd事件表
-#endif
-struct conn_info{
+struct conn_info{//这个结构体只是为了io完成操作后标识fd和io类型的
     int fd;
     int event;
 };
+struct conn{
+    int fd;
+    char wbuffer[BUFFER_SIZE];
+    char rbuffer[BUFFER_SIZE];
+    int wlength;
+    int rlength;
+};
+static struct conn connection[1024]={0};
 int uring_init_server(unsigned int port){
     int socketfd=socket(AF_INET,SOCK_STREAM,0);
     struct sockaddr_in addr;
@@ -36,10 +42,6 @@ int uring_init_server(unsigned int port){
     }
     if(listen(socketfd,5)<0){
         perror("listen");
-        return -1;
-    }
-    if(fd_register(socketfd,LISTENFD)){//将返回的fd，调用事件注册函数
-        printf(" fd:%d of event_register is failed\n",socketfd);
         return -1;
     }
     return socketfd;
@@ -74,53 +76,34 @@ int set_event_accept(struct io_uring*ring,int fd,struct sockaddr* addr,socklen_t
     memcpy(&sqe->user_data,&conn,sizeof(conn));//sqe有个void*的user_data来存
     INFO("memcpy\n");
 }
-#if 1
-int fd_register(int fd,int flag){//事件注册函数，调用刚刚的set_event()，设置监听io事件类型，
-    //把fd加入到事件表中
-    connection[fd].fd=fd;
-    connection[fd].send_callback=uring_send_cb;//赋值相应的回调函数
-    memset(connection[fd].rbuffer,0,BUFFER_SIZE);//把收发缓冲区清空
-    memset(connection[fd].wbuffer,0,BUFFER_SIZE);
-    connection[fd].rlength=0;
-    connection[fd].wlength=0;
-    if(flag == LISTENFD){
-        connection[fd].r_action.accept_callback=uring_accept_cb;
-        connection[fd].is_listenfd=1;
-    }else if(flag == CLIENTFD){
-        connection[fd].r_action.recv_callback=uring_recv_cb;
-        connection[fd].is_listenfd=0;
-    }
-    return 0;
-}
-#endif
-typedef struct io_uring_arg_client{
-    struct io_uring *ring;
-    int fd;
-    void *buf;
-    size_t len;
-    int flag;
-}client_arg;
-typedef struct io_uring_arg_accept{
-    struct io_uring*ring;
-    int fd;
-    struct sockaddr* addr;
-    socklen_t *addrlen;
-    int flag;
-}accept_arg;
-int uring_recv_cb(int fd,void *arg){
-    client_arg* Arg=(client_arg*)arg;
-    memset(Arg->buf,0,BUFFER_SIZE);
-    int ret=set_event_recv(Arg->ring,Arg->fd,Arg->buf,Arg->len,Arg->flag);
-    connection[fd].rlength=ret;
-}
-int uring_send_cb(int fd,void *arg){
-    client_arg* Arg=(client_arg*)arg;
-    set_event_send(Arg->ring,Arg->fd,Arg->buf,Arg->len,Arg->flag);
-}
-int uring_accept_cb(int fd,void *arg){
-    accept_arg* Arg=(accept_arg*)arg;
-    set_event_accept(Arg->ring,Arg->fd,Arg->addr,Arg->addrlen,Arg->flag);
-}
+// typedef struct io_uring_arg_client{
+//     struct io_uring *ring;
+//     int fd;
+//     void *buf;
+//     size_t len;
+//     int flag;
+// }client_arg;
+// typedef struct io_uring_arg_accept{
+//     struct io_uring*ring;
+//     int fd;
+//     struct sockaddr* addr;
+//     socklen_t *addrlen;
+//     int flag;
+// }accept_arg;
+// int uring_recv_cb(int fd,void *arg){
+//     client_arg* Arg=(client_arg*)arg;
+//     memset(Arg->buf,0,BUFFER_SIZE);
+//     int ret=set_event_recv(Arg->ring,Arg->fd,Arg->buf,Arg->len,Arg->flag);
+//     connection[fd].rlength=ret;
+// }
+// int uring_send_cb(int fd,void *arg){
+//     client_arg* Arg=(client_arg*)arg;
+//     set_event_send(Arg->ring,Arg->fd,Arg->buf,Arg->len,Arg->flag);
+// }
+// int uring_accept_cb(int fd,void *arg){
+//     accept_arg* Arg=(accept_arg*)arg;
+//     set_event_accept(Arg->ring,Arg->fd,Arg->addr,Arg->addrlen,Arg->flag);
+// }
 int uring_start(unsigned int port){
     struct io_uring_params params;//
     memset(&params,0,sizeof(struct io_uring_params));
@@ -135,7 +118,10 @@ int uring_start(unsigned int port){
         set_event_accept(&ring,socketfd,(struct sockaddr*)&addr,&addrlen,0);
         i++;
     }
+    printf("network:proactor\n");
     gettimeofday(&begin,NULL);
+    // char wbuffer[BUFFER_SIZE]={0};
+    // char rbuffer[BUFFER_SIZE]={0};
     while(1){
         io_uring_submit(&ring);//提交给执行
         struct io_uring_cqe* cqe;
@@ -147,24 +133,33 @@ int uring_start(unsigned int port){
             struct conn_info result;
             memcpy(&result,&entries->user_data,sizeof(result));
             if(result.event==EVENT_RECV){
-                int ret=entries->res;
+                int ret=entries->res;//ret==BUFFER_SIZE?应该不是，应该是字节数
                 if(ret>0){
-                    INFO("set_event_recv ret: %d, %s,%d\n", ret, connection[result.fd].rbuffer,connection[result.fd].rlength);
+                    INFO("set_event_recv ret: %d, %s\n", ret, connection[result.fd].rbuffer);
+                    
                     #if ENABLEKV
-                    kv_request(&connection[result.fd]);
+                    struct result res;
+                    kv_request(connection[result.fd].rbuffer,ret,&res);//收到数据后解析包
+                    connection[result.fd].wlength=kv_response(connection[result.fd].wbuffer,BUFFER_SIZE,&res);//
                     #endif
-                     client_arg arg={
-                    .ring=&ring,.fd=result.fd,.buf=connection[result.fd].wbuffer,.len=connection[result.fd].wlength,.flag=0
-                    };
-                    connection[result.fd].send_callback(result.fd,(void*)&arg);
+                    //  client_arg arg={
+                    // .ring=&ring,.fd=result.fd,.buf=connection[result.fd].wbuffer,.len=connection[result.fd].wlength,.flag=0
+                    // };
+                    // connection[result.fd].send_callback(result.fd,(void*)&arg);
+                    set_event_send(&ring,result.fd,connection[result.fd].wbuffer,connection[result.fd].wlength,0);
+
                 }else if(ret==0){
                     close(result.fd);
                 }
             }else if(result.event==EVENT_ACCEPT){
-                accept_arg arg_accept={
-                     .ring=&ring,.fd=result.fd,.addr=(struct sockaddr*)&addr,.addrlen=&addrlen,.flag=0
-                };
-                connection[result.fd].r_action.accept_callback(result.fd,(void*)&arg_accept);
+                // accept_arg arg_accept={
+                //      .ring=&ring,.fd=result.fd,.addr=(struct sockaddr*)&addr,.addrlen=&addrlen,.flag=0
+                // };
+                // connection[result.fd].r_action.accept_callback(result.fd,(void*)&arg_accept);
+                struct sockaddr_in addr;
+                memset(&addr,0,sizeof(struct sockaddr_in));
+                socklen_t len=sizeof(struct sockaddr_in);
+                set_event_accept(&ring,result.fd,(struct sockaddr*)&addr,&len,0);
                 int connfd=entries->res;
                  if(connfd%10000==0){
                     struct timeval current;
@@ -173,26 +168,22 @@ int uring_start(unsigned int port){
                     printf("Hello server:  clientfd-->%d,timeused:%d\n",connfd,time);
                     memcpy(&begin,&current,sizeof(struct timeval));
                 }
-                 if(fd_register(connfd,CLIENTFD)){//将返回的fd，调用事件注册函数
-                    printf(" fd:%d of event_register is failed\n",connfd);
-                    return -1;
-                }
-                client_arg arg_recv={
-                .ring=&ring,.fd=connfd,.buf=connection[connfd].rbuffer,.len=BUFFER_SIZE,.flag=0
-               };
-               connection[connfd].r_action.recv_callback(connfd,(void*)&arg_recv);
+            //     client_arg arg_recv={
+            //     .ring=&ring,.fd=connfd,.buf=connection[connfd].rbuffer,.len=BUFFER_SIZE,.flag=0
+            //    };
+            //    connection[connfd].r_action.recv_callback(connfd,(void*)&arg_recv);
+            set_event_recv(&ring,connfd,connection[connfd].rbuffer,BUFFER_SIZE,0);
             }else if(result.event==EVENT_SEND){
                int ret=entries->res;
-               #if ENABLEKV
-               kv_response(&connection[result.fd]);
-               #endif
-               client_arg arg={
-                .ring=&ring,.fd=result.fd,.buf=connection[result.fd].rbuffer,.len=BUFFER_SIZE,.flag=0
-               };
-               connection[result.fd].r_action.recv_callback(result.fd,(void*)&arg);
-            }
+            //    client_arg arg={
+            //     .ring=&ring,.fd=result.fd,.buf=connection[result.fd].rbuffer,.len=BUFFER_SIZE,.flag=0
+            //    };
+            //    connection[result.fd].r_action.recv_callback(result.fd,(void*)&arg);
+            // }
+            set_event_recv(&ring,result.fd,connection[result.fd].rbuffer,BUFFER_SIZE,0);
         }
-        io_uring_cq_advance(&ring, nready);
     }
-    return 0;
+    io_uring_cq_advance(&ring, nready);
+}
+return 0;
 }

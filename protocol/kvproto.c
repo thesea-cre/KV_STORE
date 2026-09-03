@@ -80,6 +80,7 @@ int kv_payload_decode(uint8_t* payload,size_t payload_len,kv_request_t * req){
     if(payload==NULL||req==NULL) return -1;
     int key_num=0;
     int value_num=0;
+    int data_num=0;
     while(offset<payload_len){//边界条件还没检查,如果tlv不完整，会越界吗
         TLV tlv;
         memset(&tlv,0,sizeof(TLV));
@@ -110,9 +111,15 @@ int kv_payload_decode(uint8_t* payload,size_t payload_len,kv_request_t * req){
             default:
                 break;
         }
+        // req->data[data_num]->data=(char *)kv_malloc(tlv.length);
+        // req->data[data_num]->type=tlv.type;
+        // req->data[data_num]->length=tlv.length;
+        // req->data[data_num]->tag=tlv.tag;
+        // data_num++;
     }
     req->key_num=key_num;
     req->value_num=value_num;
+    // req->data_num=data_num;
     return offset;
 }
 void kv_request_t_init(kv_request_t *req){

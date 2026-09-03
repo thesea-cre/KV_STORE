@@ -10,14 +10,15 @@
 #include <assert.h>
 #include"coroutine.h"
 #include<errno.h>
- ssize_t (*real_recv)(int ,void *,size_t,int)=NULL;
- ssize_t (*real_send)(int,const void*,size_t,int)=NULL;
- int (*real_accept)(int,struct sockaddr*,socklen_t*)=NULL;
+ ssize_t (*real_recv)(int ,void *,size_t,int)=recv;
+ ssize_t (*real_send)(int,const void*,size_t,int)=send;
+ int (*real_accept)(int,struct sockaddr*,socklen_t*)=accept;
 static __thread schedule* tls_sched;
  void hook_init(){
-    real_recv=dlsym(RTLD_NEXT, "recv");
-    real_accept = dlsym(RTLD_NEXT, "accept");
-    real_send=dlsym(RTLD_NEXT, "send");
+    return;
+    // real_recv=dlsym(RTLD_NEXT, "recv");
+    // real_accept = dlsym(RTLD_NEXT, "accept");
+    // real_send=dlsym(RTLD_NEXT, "send");
 }
 //  ssize_t recv(int fd,void *buffer,size_t len,int flag){
 //     coroutine* cor=tls_sched->co_list[fd];
@@ -51,7 +52,7 @@ static __thread schedule* tls_sched;
 //         }
 //     }
 // }
-ssize_t recv(int fd, void *buffer, size_t len, int flag) {
+ssize_t co_recv(int fd, void *buffer, size_t len, int flag) {
     coroutine* cor = tls_sched->co_list[fd];
     while (1) {
         ssize_t n = real_recv(fd, buffer, len, flag);
@@ -72,7 +73,7 @@ ssize_t recv(int fd, void *buffer, size_t len, int flag) {
         co_yield(cor);
     }
 }
-ssize_t send(int fd,const void *buffer,size_t len,int flag){
+ssize_t co_send(int fd,const void *buffer,size_t len,int flag){
     coroutine* cor=tls_sched->co_list[fd];
     while(1){
         ssize_t n=real_send(fd,buffer,len,flag);
@@ -117,7 +118,7 @@ ssize_t send(int fd,const void *buffer,size_t len,int flag){
     //     }
     // }
 }
-int accept(int fd, struct sockaddr* addr, socklen_t* addrlen)
+int co_accept(int fd, struct sockaddr* addr, socklen_t* addrlen)
 {
     coroutine *cor=tls_sched->co_list[fd];
     while(1){
