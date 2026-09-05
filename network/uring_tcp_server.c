@@ -12,7 +12,6 @@
 #define EVENT_SEND 1
 #define EVENT_ACCEPT 2
 #define ENTRIES_LENGTH 1024
-#define BUFFER_SIZE SIZE
 // int uring_recv_cb(int fd,void *arg);
 // int uring_send_cb(int fd,void *arg);
 // int uring_accept_cb(int fd,void *arg);

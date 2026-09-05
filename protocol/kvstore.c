@@ -1,29 +1,17 @@
-#include<stdio.h>
-#include<stdlib.h>
-#include<string.h>
-#include<assert.h>
 #include"kvstore.h"
-#include"server.h"
-#include"kv_array.h"
-#include"kv_hash.h"
-#include"kv_rbtree.h"
-#include"mempool.h"
-#include<arpa/inet.h>
-#define KV_MAX_TOKENS 8
-#define BUFFER_SIZE 1024
 kv_array_t global_array;
 KV_Map global_hash;
 KV_Rbtree global_rbtree;
 static Mempool_Manager *msg;
 void *kv_malloc(size_t size){//用的很多的系统函数最好包装一层，为了修改方便
-    #if 0
+    #if 1
     return malloc(size);
     #else 
     return Managerpool_Alloc(msg,size);
     #endif
 }
 void kv_free(void* ptr){
-    #if 0
+    #if 1
     return free(ptr);
     #else
     return Managerpool_free(msg,ptr);
@@ -317,6 +305,7 @@ int kv_cmd_exist(kv_request_t req,result*c){
     }
 }
 //>0表示处理了多少字节，<0 非法包，=0 包不完整
+//rlength这个包的长度
 int kv_protocol(char *msg,int rlength,result *c){//一个包一个包的处理
     if(rlength<10){
         return 0;
@@ -488,20 +477,4 @@ void dest_kvengine(void){
     #elif ENGINE==ENGINE_RBTREE
     KV_Rbtree_destory(&global_rbtree);
     #endif
-}
-int main(int argc,char *argv[]){
-    if(argc!=2) return -1;
-    #if 1
-    msg=Managerpool_GetInstance();
-    #endif
-    unsigned int port=atoi(argv[1]);
-    init_kvengine();
-    #if NETWORK_SELECT == ENABLE_REACTOR
-    reactor_entry(port);
-    #elif NETWORK_SELECT == ENABLE_PROACTOR
-    uring_start(port);
-    #elif NETWORK_SELECT == ENABLE_NTYCO
-    nytco(port);
-    #endif
-    dest_kvengine();
 }

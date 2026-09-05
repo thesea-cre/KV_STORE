@@ -1,12 +1,12 @@
-#include"server.h"
 #ifndef _REACTOR_H_
 #define _REACTOR_H_
+#include"server.h"
 #define LISTENFD 1
 #define CLIENTFD 0
 #define CONNECTION_SIZE MAX_CONNECT
 #define EVENT_SIZE 1024
-#define BUFFER_SIZE SIZE
-#include"server.h"
+#define BUFFER_SIZE 1024
+
 typedef int (*ECALLBACK)(int fd,void *user_arg);
 struct conn{
     int fd;

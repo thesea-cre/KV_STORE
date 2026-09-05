@@ -11,8 +11,9 @@ SRCS=protocol/kvstore.c \
  	 network/uring_tcp_server.c \
  	 network/nytco.c \
  	 network/nytco/coroutine.c \
-  	 network/nytco/ctx_switch.S 
-TARGET=kvstore
+  	 network/nytco/ctx_switch.S \
+	 Main/main.c
+TARGET=main.exe
 CFLAGS= -I/home/snow/share/KV_STORE/lib/liburing/src/include -I/home/snow/share/KV_STORE/network/nytco \
 	-D_GNU_SOURCE \
 	-mcmodel=large \

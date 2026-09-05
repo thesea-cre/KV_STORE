@@ -54,6 +54,10 @@ typedef struct{//但都是上层协议的东西，网络层是不知道这些东
     DATA* data[MAX_CMD];//新版感觉只定义一个data就够了，因为DATA新添了tag字段
     int data_num;
 }kv_request_t;//解包用的结构体，主要负责解析出key,value;
+typedef struct result{//存储上层处理包后要回应的协议tlv
+    TLV *tlv_array;
+    uint32_t tlv_num;
+}result;//定义的一个贯穿fd生命周期的用于存储上层协议处理结果的结构体，不然上层处理完接受的包后，后续不知道怎么发包
 extern const char *command[];//命令
 extern const char *response[];//回应，目前没用到
 int kv_header_encode(const kv_header_t* hdr,uint8_t* data,size_t data_len);
