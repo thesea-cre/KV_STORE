@@ -12,8 +12,7 @@
 #define EVENT_SEND 1
 #define EVENT_ACCEPT 2
 #define ENTRIES_LENGTH 1024
-#define BUFFER_SIZE 1024
-#define MAX_CONNECT 1024
+#define BUFFER_SIZE SIZE
 // int uring_recv_cb(int fd,void *arg);
 // int uring_send_cb(int fd,void *arg);
 // int uring_accept_cb(int fd,void *arg);
@@ -25,7 +24,9 @@ struct conn_info{//这个结构体只是为了io完成操作后标识fd和io类�
 struct conn{
     int fd;
     char wbuffer[BUFFER_SIZE];
+    char res_buf[BUFFER_SIZE];
     char rbuffer[BUFFER_SIZE];
+    char buf[BUFFER_SIZE];
     int wlength;
     int rlength;
 };
@@ -120,8 +121,8 @@ int uring_start(unsigned int port){
     }
     printf("network:proactor\n");
     gettimeofday(&begin,NULL);
-    // char wbuffer[BUFFER_SIZE]={0};
-    // char rbuffer[BUFFER_SIZE]={0};
+    // char res_buf[BUFFER_SIZE]={0};
+    // char buf[BUFFER_SIZE]={0};
     while(1){
         io_uring_submit(&ring);//提交给执行
         struct io_uring_cqe* cqe;
@@ -133,21 +134,28 @@ int uring_start(unsigned int port){
             struct conn_info result;
             memcpy(&result,&entries->user_data,sizeof(result));
             if(result.event==EVENT_RECV){
-                int ret=entries->res;//ret==BUFFER_SIZE?应该不是，应该是字节数
+                int ret=entries->res;//理想状态下是对的，字节数
                 if(ret>0){
                     INFO("set_event_recv ret: %d, %s\n", ret, connection[result.fd].rbuffer);
-                    
                     #if ENABLEKV
-                    struct result res;
-                    kv_request(connection[result.fd].rbuffer,ret,&res);//收到数据后解析包
-                    connection[result.fd].wlength=kv_response(connection[result.fd].wbuffer,BUFFER_SIZE,&res);//
+                    memcpy(connection[result.fd].rbuffer+connection[result.fd].rlength,connection[result.fd].buf,ret);
+                    connection[result.fd].rlength+=ret;
+                    if(kv_request(connection[result.fd].rbuffer,
+                        connection[result.fd].wbuffer,&connection[result.fd].rlength,
+                        &connection[result.fd].wlength)<0){
+                        memset(&connection[result.fd],0,sizeof(struct conn));
+                    }
                     #endif
                     //  client_arg arg={
                     // .ring=&ring,.fd=result.fd,.buf=connection[result.fd].wbuffer,.len=connection[result.fd].wlength,.flag=0
                     // };
                     // connection[result.fd].send_callback(result.fd,(void*)&arg);
-                    set_event_send(&ring,result.fd,connection[result.fd].wbuffer,connection[result.fd].wlength,0);
-
+                    if(connection[result.fd].wlength>0){
+                        set_event_send(&ring,result.fd,connection[result.fd].wbuffer,connection[result.fd].wlength,0);//要同时监听可读事件和可写事件，不然如果数据没来完，就会卡死
+                        set_event_recv(&ring,result.fd,connection[result.fd].buf,BUFFER_SIZE,0);
+                    }else{
+                        set_event_recv(&ring,result.fd,connection[result.fd].buf,BUFFER_SIZE,0);
+                    }
                 }else if(ret==0){
                     close(result.fd);
                 }
@@ -172,18 +180,33 @@ int uring_start(unsigned int port){
             //     .ring=&ring,.fd=connfd,.buf=connection[connfd].rbuffer,.len=BUFFER_SIZE,.flag=0
             //    };
             //    connection[connfd].r_action.recv_callback(connfd,(void*)&arg_recv);
-            set_event_recv(&ring,connfd,connection[connfd].rbuffer,BUFFER_SIZE,0);
+            set_event_recv(&ring,connfd,connection[connfd].buf,BUFFER_SIZE,0);
             }else if(result.event==EVENT_SEND){
-               int ret=entries->res;
+                int ret=entries->res;
             //    client_arg arg={
             //     .ring=&ring,.fd=result.fd,.buf=connection[result.fd].rbuffer,.len=BUFFER_SIZE,.flag=0
             //    };
             //    connection[result.fd].r_action.recv_callback(result.fd,(void*)&arg);
             // }
-            set_event_recv(&ring,result.fd,connection[result.fd].rbuffer,BUFFER_SIZE,0);
+                connection[result.fd].wlength-=ret;
+                if(connection[result.fd].wlength>0){
+                    memmove(connection[result.fd].wbuffer, 
+                    connection[result.fd].wbuffer + ret, 
+                    connection[result.fd].wlength);
+                }
+                if(kv_request(connection[result.fd].rbuffer,connection[result.fd].wbuffer,&connection[result.fd].rlength,&connection[result.fd].wlength)<0){
+                    memset(&connection[result.fd],0,sizeof(struct conn));
+                }
+                if(connection[result.fd].wlength>0){
+                        set_event_send(&ring,result.fd,connection[result.fd].wbuffer,connection[result.fd].wlength,0);//要同时监听可读事件和可写事件，不然如果数据没来完，就会卡死
+                        set_event_recv(&ring,result.fd,connection[result.fd].buf,BUFFER_SIZE,0);  
+                }else{
+                        set_event_recv(&ring,result.fd,connection[result.fd].buf,BUFFER_SIZE,0);
+                }
+                        
+            }
         }
+        io_uring_cq_advance(&ring, nready);
     }
-    io_uring_cq_advance(&ring, nready);
-}
-return 0;
+    return 0;
 }

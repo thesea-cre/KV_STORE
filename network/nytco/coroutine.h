@@ -10,7 +10,7 @@
 #define INFO
 #endif
 // ========== 配置宏 ==========
-#define STACK_SIZE (8*1024)    // 协程栈大小，当前1KB极易栈溢出，建议至少改为16384(16KB)
+#define STACK_SIZE (16*1024)    // 协程栈大小，当前1KB极易栈溢出，建议至少改为16384(16KB)
 #define EPOLL_EVENT 1024   // epoll单次返回最大事件数
 #define CO_LIST 1048576       // 协程数组最大容量，注意：fd值不能超过该数值
 typedef struct {

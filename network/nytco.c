@@ -6,11 +6,9 @@
 #include "coroutine.h" // 你的协程库头文件
 #include<sys/time.h>
 #include"server.h"
-#define PORT 2000
-#define BUF_SIZE 1024
-#define MAX_CLIENT_NUM 1048576
-#define PORT_NUM 20
-#define TIME_SUB_MS(tv1, tv2)  ((tv1.tv_sec - tv2.tv_sec) * 1000 + (tv1.tv_usec - tv2.tv_usec) / 1000)
+#define BUF_SIZE SIZE
+#define MAX_CLIENT_NUM MAX_CONNECT
+#define PORT_NUM MAX_PORT
 schedule* tls_sched;
 struct timeval tv_begin;
 void client_handler(void* arg) {
@@ -19,21 +17,50 @@ void client_handler(void* arg) {
     //printf("客户端协程启动，fd=%d\n", fd); // 加这行
     free(arg);
 
-    char buf[BUF_SIZE];
+    char buf[BUF_SIZE]={0};
+    char wbuffer[BUF_SIZE]={0};
+    int wlength=0;
+    char rbuffer[BUF_SIZE]={0};
+    int rlength=0;
+    char res_buf[BUF_SIZE]={0};
     while (1) {
         // 调用Hook后的recv，阻塞时自动让出CPU
         ssize_t n = co_recv(fd, buf, BUF_SIZE, 0);
-        #if ENABLEKV
-        struct result res;
-        kv_request(buf,n,&res);
-        memset(buf,0,BUF_SIZE);
-        n=kv_response(buf,BUF_SIZE,&res);
-        #endif
         if (n <= 0) {
             break;
         }
+        if (rlength + n > BUF_SIZE) {
+            printf("fd %d recv buffer overflow\n", fd);
+            break;
+        }
+        #if ENABLEKV
+            memcpy(rbuffer+rlength,buf,n);//这里处理拆包的方式:追加包，先放到一个暂时的缓冲区
+            rlength+=n;
+        #endif
+        #if ENABLEKV
+        while(1){
+            int proc_ret=kv_request(rbuffer,wbuffer,&rlength,&wlength);
+            if (proc_ret < 0) {
+                printf("fd %d invalid packet\n", fd);
+                goto close_conn; // 直接跳出，关闭连接
+            }
+            if (proc_ret == 0) {
+                break; // 没有完整包了，退出解包循环
+            }
+            if(wlength>0){
+                int ret=co_send(fd, wbuffer, wlength, 0);
+                if (ret <= 0) {
+                    printf("fd %d send error\n", fd);
+                    goto close_conn;
+                }
+                wlength-=ret;
+                if(wlength>0){
+                    memmove(wbuffer,wbuffer+ret,wlength);
+                }
+            }
+        }
+        #endif
        // printf("recv from client:%s,%ld(bytes)\n",buf,n);//业务执行完返回一个值，拿这个值去判断执行完没有
-        co_send(fd, buf, n, 0);
     }
     // struct rb_node* node = rb_find(&tls_sched->rb_wait, &fd, cmp_fd_key);
     // if (node) {
@@ -45,6 +72,7 @@ void client_handler(void* arg) {
     //cor->status=fin;
     //cor_destroy();
     //free(cor)
+close_conn:
     close(fd);
 }
 
@@ -109,7 +137,7 @@ int nytco(unsigned int port) {
         perror("listen");
         return 1;
     }
-    printf("Server listening on port %d\n", PORT+i);
+    printf("Server listening on port %d\n", port+i);
     int* p_listen_fd = malloc(sizeof(int));
     *p_listen_fd = listen_fd;
     INFO("准备进入create_cor\n");

@@ -109,9 +109,11 @@ int accept_cb(int fd,void *arg){
     #endif
     return clientfd;
 }
-int recv_cb(int fd,void *arg){
-    memset(connection[fd].rbuffer,0,BUFFER_SIZE);//每次接受都应该清空接受缓冲区
-    int ret=recv(fd,connection[fd].rbuffer,BUFFER_SIZE,0);//直接recv
+int recv_cb(int fd,void *arg){//流控，应用层反压
+    char  buf[BUFFER_SIZE]={0};
+    int ret;
+    ret=recv(fd,buf,BUFFER_SIZE,0);//先recv到暂时缓冲区
+    printf("收包长度：%d",ret);
     if(ret<0){
         perror("recv");
         cancel_event(fd);
@@ -125,54 +127,97 @@ int recv_cb(int fd,void *arg){
         close(fd);
         return 0;
     }else{
-        connection[fd].rlength=ret;
+        memcpy(connection[fd].rbuffer+connection[fd].rlength,buf,ret);//这里处理拆包的方式:追加包，先放到一个暂时的缓冲区
+        connection[fd].rlength+=ret;
         INFO("recv from clientfd:clientfd--> %d,buffer-->%s\n",fd,connection[fd].rbuffer);
         #if ENABLEKV
-        kv_request(connection[fd].rbuffer,connection[fd].rlength,&connection[fd].res);
+        if(kv_request(connection[fd].rbuffer,connection[fd].wbuffer,&connection[fd].rlength,&connection[fd].wlength)<0){
+            cancel_event(fd);
+            memset(&connection[fd],0,sizeof(struct conn));
+            close(fd);
+            return -1;
+        }
         #endif
-        set_event(fd,EPOLLOUT);
+            if(connection[fd].wlength>0){
+                set_event(fd,EPOLLIN|EPOLLOUT);//要同时监听可读事件和可写事件，不然如果数据没来完，就会卡死
+            }else{
+                set_event(fd,EPOLLIN);
+            }
         return 0;
     }
 }
 int send_cb(int fd,void *arg){
-    #if ENABLEKV
-    connection[fd].wlength=kv_response(connection[fd].wbuffer,BUFFER_SIZE,&connection[fd].res);
-    #endif
+    
     #if TEST100w
     memcpy(connection[fd].wbuffer,connection[fd].rbuffer,connection[fd].rlength);
     connection[fd].wlength=connection[fd].rlength;
     #endif
     int set;
-    if(connection[fd].status==1){//发送的时候做一个简单的状态转换机，解决需要多次send的问题，不用多次调用send，而是设置它的
-        //事件类型，在fd结构体里定义一个状态机标志，初态先把请求头send,中间态再次设置EPOLLOUT，把回应内容send,终态判断fd的发送区是否为空，为空再次send
-        set= send(fd,connection[fd].wbuffer,connection[fd].wlength,0);//send之后不一定是recv，我再send
-        if(set<0){
-            perror("send");
+    set= send(fd,connection[fd].wbuffer,connection[fd].wlength,0);//send之后不一定是recv，我再send
+    if(set<0){
+        perror("send");
+        cancel_event(fd);
+        close(fd);
+        return -1;
+    }else if(set == 0){
+        printf("fd: %d is diconnected\n",fd);
+        memset(&connection[fd],0,sizeof(struct conn));
+        cancel_event(fd);
+        close(fd);
+        return 0;
+    }else{
+        INFO("server send to clientd:( %s)   %d(bytes)\n",connection[fd].wbuffer,set);
+        connection[fd].wlength -= set;  // 扣掉已经发给内核的字节
+        if(connection[fd].wlength > 0){
+            // 没发完，残留前移，继续保留写事件
+            memmove(connection[fd].wbuffer, 
+                connection[fd].wbuffer + set, 
+                connection[fd].wlength);
+            set_event(fd, EPOLLIN | EPOLLOUT);
+        }
+        if(kv_request(connection[fd].rbuffer,connection[fd].wbuffer,&connection[fd].rlength,&connection[fd].wlength)<0){
             cancel_event(fd);
+            memset(&connection[fd],0,sizeof(struct conn));
             close(fd);
             return -1;
-        }else if(set == 0){
-            printf("fd: %d is diconnected\n",fd);
-            memset(&connection[fd],0,sizeof(struct conn));
-            cancel_event(fd);
-            close(fd);
-            return 0;
-        }else{
-            INFO("server send to clientd:( %s)   %d(bytes)\n",connection[fd].wbuffer,set);
-            connection[fd].wlength -= set;
-            set_event(fd,EPOLLOUT);
         }
-    }else if(connection[fd].status==2){//三个状态具体怎么发送，业务层去管怎么发送
-        set=send(fd,connection[fd].wbuffer,connection[fd].wlength,0);
-        set_event(fd,EPOLLIN);
-
-    }else if(connection[fd].status==0){
-        if (connection[fd].wlength != 0) {
-                set= send(fd,connection[fd].wbuffer,connection[fd].wlength,0);
-                INFO("server send to clientd:(%s)   %d(bytes)\n",connection[fd].wbuffer,set);
+        if(connection[fd].wlength>0){
+                set_event(fd,EPOLLIN|EPOLLOUT);//要同时监听可读事件和可写事件，不然如果数据没来完，就会卡死
+            }else{
+                set_event(fd,EPOLLIN);
             }
-        set_event(fd,EPOLLIN);
     }
+    // if(connection[fd].status==1){//发送的时候做一个简单的状态转换机，解决需要多次send的问题，不用多次调用send，而是设置它的
+    //     //事件类型，在fd结构体里定义一个状态机标志，初态先把请求头send,中间态再次设置EPOLLOUT，把回应内容send,终态判断fd的发送区是否为空，为空再次send
+    //     set= send(fd,connection[fd].wbuffer,connection[fd].wlength,0);//send之后不一定是recv，我再send
+    //     if(set<0){
+    //         perror("send");
+    //         cancel_event(fd);
+    //         close(fd);
+    //         return -1;
+    //     }else if(set == 0){
+    //         printf("fd: %d is diconnected\n",fd);
+    //         memset(&connection[fd],0,sizeof(struct conn));
+    //         cancel_event(fd);
+    //         close(fd);
+    //         return 0;
+    //     }else{
+    //         INFO("server send to clientd:( %s)   %d(bytes)\n",connection[fd].wbuffer,set);
+    //         connection[fd].wlength -= set;
+    //         set_event(fd,EPOLLIN);
+    //     }
+    // }else if(connection[fd].status==2){//三个状态具体怎么发送，业务层去管怎么发送
+    //     set=send(fd,connection[fd].wbuffer,connection[fd].wlength,0);
+    //     set_event(fd,EPOLLIN);
+
+    // }else if(connection[fd].status==0){
+    //     if (connection[fd].wlength != 0) {
+    //             set= send(fd,connection[fd].wbuffer,connection[fd].wlength,0);
+    //             connection[fd].wlength=0;
+    //             INFO("server send to clientd:(%s)   %d(bytes)\n",connection[fd].wbuffer,set);
+    //         }
+    //     set_event(fd,EPOLLIN);
+    // }
 }
 typedef struct reactor_arg{
     int fd;

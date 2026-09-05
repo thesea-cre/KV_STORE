@@ -8,10 +8,10 @@ SRCS=protocol/kvstore.c \
 	 mempool/mempool.c \
 	 protocol/kvproto.c \
 	 log/log.c \
-	 network/uring_tcp_server.c \
-	 network/nytco.c \
-	 network/nytco/coroutine.c \
- 	 network/nytco/ctx_switch.S 
+ 	 network/uring_tcp_server.c \
+ 	 network/nytco.c \
+ 	 network/nytco/coroutine.c \
+  	 network/nytco/ctx_switch.S 
 TARGET=kvstore
 CFLAGS= -I/home/snow/share/KV_STORE/lib/liburing/src/include -I/home/snow/share/KV_STORE/network/nytco \
 	-D_GNU_SOURCE \

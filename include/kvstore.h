@@ -19,9 +19,16 @@ int kv_protocol(char *msg,int len,result*c);
 int kv_filter_protocol(char **token,int count,char *response);
 void *kv_malloc(size_t size);
 void kv_free(void* ptr);
+int kv_cmd_set(kv_request_t req,result*c);
+int kv_cmd_get(kv_request_t req,result*c);
+int kv_cmd_mod(kv_request_t req,result*c);
+int kv_cmd_del(kv_request_t req,result*c);
+int kv_cmd_exist(kv_request_t req,result*c);
 extern int reactor_entry(unsigned int port);
 extern int uring_start(unsigned int port);
 extern int nytco(unsigned int port);
+void init_kvengine(void);
+void dest_kvengine(void);
 enum{
     KV_CMD_START,
     KV_CMD_SET=KV_CMD_START,

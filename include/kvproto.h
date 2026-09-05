@@ -31,7 +31,7 @@ typedef struct{//定义的协议头
     uint8_t version;
     uint8_t  msg_type;//标识协议属于回应类还是请求类
     uint16_t opcode;//操作码部分先就这样
-    uint32_t length;//目前定义为整个传输的长度
+    uint32_t length;//数据部分长度
 }kv_header_t;//2+1+1+2+4=10
 typedef struct tlv{
     uint16_t tag;//标识键，值，消息
