@@ -7,7 +7,6 @@ int aof_append(const char *pkt,int pkt_len);
 int aof_recover(void);
 int aof_fsync(void);
 void aof_close(void);
-static int aof_fd=-1;
-static pthread_mutex_t aof_mutex;
 
+ 
 #endif

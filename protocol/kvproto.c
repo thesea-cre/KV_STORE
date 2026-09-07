@@ -4,7 +4,8 @@
 //#include"kvstore.h"
 const char *command[]={
     "SET","GET","DEL","MOD","EXIST"
-};const char *response[]={
+};
+const char *response[]={
     "OK","ERROR","EXIST","NOT EXIST"
 };
 extern void *kv_malloc(size_t size);
@@ -22,7 +23,6 @@ int kv_header_encode(const kv_header_t* header,uint8_t* buf,size_t buf_len){
     memcpy(buf+offset,&msg_type,1),offset+=1;
     memcpy(buf+offset,&opcode,2),offset+=2;
     memcpy(buf+offset,&len,4),offset+=4;
-
     return offset;
 }
 int kv_header_decode(const uint8_t *buf,size_t buf_len,kv_header_t * header){
@@ -80,9 +80,9 @@ int kv_payload_decode(uint8_t* payload,size_t payload_len,kv_request_t * req){
     if(payload==NULL||req==NULL) return -1;
     int key_num=0;
     int value_num=0;
-    int data_num=0;
+    //int data_num=0;
     while(offset<payload_len){//边界条件还没检查,如果tlv不完整，会越界吗
-        TLV tlv;
+        TLV tlv;//while循环一条一条解析
         memset(&tlv,0,sizeof(TLV));
         ret=kv_tlv_decode(payload+offset,payload_len,&tlv);
         offset+=ret;
@@ -123,6 +123,9 @@ int kv_payload_decode(uint8_t* payload,size_t payload_len,kv_request_t * req){
     return offset;
 }
 void kv_request_t_init(kv_request_t *req){
+    memset(req, 0, sizeof(kv_request_t));
+    req->key_num = 0;
+    req->value_num = 0;
     for(int i=0;i<MAX_CMD;i++){
         req->key[i]=(DATA*)kv_malloc(sizeof(DATA));
         req->value[i]=(DATA*)kv_malloc(sizeof(DATA));

@@ -3,17 +3,11 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
-
-#include "kvstore.h"
+#include"server.h"
 #include "aof.h"
-#include "kv_array.h"
 
 typedef struct tlv tlv_t;
 #define TLV_KEY TYPE_STRING
-
-/* 全局存储引擎实例 */
-kv_array_t global_array;
-
 /**
  * 辅助函数：构造SET命令完整协议包
  * 注：你的 h.length 当前只计算了TLV总长度，未包含10字节固定头部
@@ -35,6 +29,7 @@ static int build_set_pkt(uint8_t *buf, int buf_size, char *key, char *value) {
 
     tlv_t key_tlv;
     key_tlv.type = TLV_KEY;
+    key_tlv.tag=TAG_KEY;
     key_tlv.length = key_len;
     key_tlv.value = (uint8_t *)key;  // 强转消除符号性警告
     int ret = kv_tlv_append(buf + offset, buf_size - offset, key_tlv);
@@ -44,6 +39,7 @@ static int build_set_pkt(uint8_t *buf, int buf_size, char *key, char *value) {
     tlv_t val_tlv;
     val_tlv.type = TLV_KEY;
     val_tlv.length = val_len;
+    val_tlv.tag=TAG_VALUE;
     val_tlv.value = (uint8_t *)value; // 强转消除符号性警告
     ret = kv_tlv_append(buf + offset, buf_size - offset, val_tlv);
     if (ret <= 0) return -1;
@@ -71,6 +67,7 @@ static int build_del_pkt(uint8_t *buf, int buf_size, const char *key) {
     tlv_t key_tlv;
     key_tlv.type = TLV_KEY;
     key_tlv.length = key_len;
+    key_tlv.tag=TAG_KEY;
     key_tlv.value = (uint8_t *)key; // 强转同时消除const警告
     int ret = kv_tlv_append(buf + offset, buf_size - offset, key_tlv);
     if (ret <= 0) return -1;
@@ -140,15 +137,12 @@ int main() {
         return -1;
     }
     printf("AOF恢复执行完成\n");
-
     /* 4. 数据正确性校验 */
     printf("\n--- 数据校验 ---\n");
-
-    char *value = kv_array_get(&global_array, "king");
+    char *value=kv_get("king");
     printf("key=king, value:%s\n", value == NULL ? "NULL(已删除)" : value);
-
-    value = kv_array_get(&global_array, "test");
-    printf("key=test, value:%s\n", value == NULL ? "NULL(不存在)" : value);
+    char *v2 =kv_get("test");
+    printf("key=test, value:%s\n", v2 == NULL ? "NULL(不存在)" : v2);
 
     /* 5. 资源清理 */
     dest_kvengine();

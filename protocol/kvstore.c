@@ -2,7 +2,7 @@
 kv_array_t global_array;
 KV_Map global_hash;
 KV_Rbtree global_rbtree;
-static Mempool_Manager *msg;
+Mempool_Manager *mempool;
 void *kv_malloc(size_t size){//用的很多的系统函数最好包装一层，为了修改方便
     #if 1
     return malloc(size);
@@ -136,6 +136,18 @@ int kv_filter_protocol(char **tokens,int count,char *response){
     return length;
 }
 #if KV_COMPLEX
+
+int kv_set(char *key,char *value){//做一个适配层，对外接口适用，隐藏核心层的选择，这样测试模块方便一点
+    int ret;
+    #if ENGINE==ENGINE_ARRAY
+    ret=kv_array_set(&global_array,key,value);
+    #elif ENGINE==ENGINE_HASH
+    ret=KV_Map_set(&global_hash,key,value);
+    #elif ENGINE==ENGINE_RBTREE
+    ret=KV_Rbtree_set(&global_rbtree,key,value);
+    #endif
+    return ret;
+}
 int kv_cmd_set(kv_request_t req,result*c){
     c->tlv_array=(TLV*)kv_malloc(c->tlv_num*sizeof(TLV));
     int ret;
@@ -146,13 +158,7 @@ int kv_cmd_set(kv_request_t req,result*c){
         if(value_type==TYPE_STRING){
             //不同类型执行不同的函数，最后将真的value值存入值中
         }
-        #if ENGINE==ENGINE_ARRAY
-        ret=kv_array_set(&global_array,key,value);
-        #elif ENGINE==ENGINE_HASH
-        ret=KV_Map_set(&global_hash,key,value);
-        #elif ENGINE==ENGINE_RBTREE
-        ret=KV_Rbtree_set(&global_rbtree,key,value);
-        #endif
+        ret=kv_set(key,value);
         c->tlv_array[i].tag=TAG_RES;
         c->tlv_array[i].type=TYPE_STRING;
         char buf[BUFFER_SIZE]={0};
@@ -170,30 +176,23 @@ int kv_cmd_set(kv_request_t req,result*c){
             memcpy(c->tlv_array[i].value,buf,c->tlv_array[i].length);
         }
     }
-    // for(int i=0;i<req.data_num;i++){
-    //     if(req.data[i]->tag==TAG_KEY){
-    //         char *key=req.data[i]->data;
-    //     }else if(req.data[i]->tag==TAG_VALUE){
-    //         char *value=req.data[i]->data;
-    //     }else if(req.data[i]->tag==TAG_RES){
-    //         char *res=req.data[i]->data;
-    //     }
-
-    // }
+}
+char *kv_get(char *key){
+    char *value;
+    #if ENGINE==ENGINE_ARRAY
+    value=kv_array_get(&global_array,key);
+    #elif ENGINE==ENGINE_HASH
+    value=KV_Map_get(&global_hash,key);
+    #elif ENGINE==ENGINE_RBTREE
+    value=KV_Rbtree_get(&global_rbtree,key);
+    #endif
+    return value;
 }
 int kv_cmd_get(kv_request_t req,result*c){
     c->tlv_array=(TLV*)kv_malloc(c->tlv_num*sizeof(TLV));
     for(int i=0;i<req.key_num;i++){
         char *key=req.key[i]->data;//存入的时候没有存入值的类型，直接存的是字节流，get出来怎么解析呢
-        char *value;
-        #if ENGINE==ENGINE_ARRAY
-        value=kv_array_get(&global_array,key);
-        #elif ENGINE==ENGINE_HASH
-        value=KV_Map_get(&global_hash,key);
-        #elif ENGINE==ENGINE_RBTREE
-        value=KV_Rbtree_get(&global_rbtree,key);
-        #endif
-        
+        char *value=kv_get(key);
         c->tlv_array[i].tag=TAG_VALUE;
         c->tlv_array[i].type=TYPE_STRING;
         char buf[BUFFER_SIZE]={0};
@@ -208,6 +207,17 @@ int kv_cmd_get(kv_request_t req,result*c){
         }
     }
 }
+int kv_mod(char *key,char *value){
+    int ret;
+    #if ENGINE==ENGINE_ARRAY
+    ret=kv_array_mod(&global_array,key,value);
+    #elif ENGINE==ENGINE_HASH
+    ret=KV_Map_mod(&global_hash,key,value);
+    #elif ENGINE==ENGINE_RBTREE
+    ret=KV_Rbtree_mod(&global_rbtree,key,value);
+    #endif
+    return ret;
+}
 int kv_cmd_mod(kv_request_t req,result*c){
     int ret;
     c->tlv_array=(TLV*)kv_malloc(c->tlv_num*sizeof(TLV));
@@ -218,13 +228,8 @@ int kv_cmd_mod(kv_request_t req,result*c){
         if(value_type==TYPE_STRING){
             //不同类型执行不同的函数，最后将真的value值存入值中
         }
-        #if ENGINE==ENGINE_ARRAY
-        ret=kv_array_mod(&global_array,key,value);
-        #elif ENGINE==ENGINE_HASH
-        ret=KV_Map_mod(&global_hash,key,value);
-        #elif ENGINE==ENGINE_RBTREE
-        ret=KV_Rbtree_mod(&global_rbtree,key,value);
-        #endif
+
+        ret=kv_mod(key,value);
         c->tlv_array[i].tag=TAG_RES;
         c->tlv_array[i].type=TYPE_STRING;
         char buf[BUFFER_SIZE]={0};
@@ -242,20 +247,24 @@ int kv_cmd_mod(kv_request_t req,result*c){
             memcpy(c->tlv_array[i].value,buf,c->tlv_array[i].length);
         }
     }
+}
+int kv_del(char *key){
+    int ret;
+    #if ENGINE==ENGINE_ARRAY
+    ret=kv_array_del(&global_array,key);
+    #elif ENGINE==ENGINE_HASH
+    ret=KV_Map_del(&global_hash,key);
+    #elif ENGINE==ENGINE_RBTREE
+    ret=KV_Rbtree_del(&global_rbtree,key);
+    #endif
+    return ret;
 }
 int kv_cmd_del(kv_request_t req,result*c){
     int ret;
     c->tlv_array=(TLV*)kv_malloc(c->tlv_num*sizeof(TLV));
     for(int i=0;i<req.key_num;i++){
         char *key=req.key[i]->data;
-        #if ENGINE==ENGINE_ARRAY
-        ret=kv_array_del(&global_array,key);
-        #elif ENGINE==ENGINE_HASH
-        ret=KV_Map_del(&global_hash,key);
-        #elif ENGINE==ENGINE_RBTREE
-        ret=KV_Rbtree_del(&global_rbtree,key);
-        #endif
-        
+        ret=kv_del(key);
         c->tlv_array[i].tag=TAG_RES;
         c->tlv_array[i].type=TYPE_STRING;
         char buf[BUFFER_SIZE]={0};
@@ -274,18 +283,23 @@ int kv_cmd_del(kv_request_t req,result*c){
         }
     }
 }
+int kv_exist(char *key){
+    int ret;
+    #if ENGINE==ENGINE_ARRAY
+    ret=kv_array_exist(&global_array,key);
+    #elif ENGINE==ENGINE_HASH
+    ret=KV_Map_exist(&global_hash,key);
+    #elif ENGINE==ENGINE_RBTREE
+    ret=KV_Rbtree_exist(&global_rbtree,key);
+    #endif
+    return ret;
+}
 int kv_cmd_exist(kv_request_t req,result*c){
     int ret;
     c->tlv_array=(TLV*)kv_malloc(c->tlv_num*sizeof(TLV));
     for(int i=0;i<req.key_num;i++){
         char *key=req.key[i]->data;
-        #if ENGINE==ENGINE_ARRAY
-        ret=kv_array_exist(&global_array,key);
-        #elif ENGINE==ENGINE_HASH
-        ret=KV_Map_exist(&global_hash,key);
-        #elif ENGINE==ENGINE_RBTREE
-        ret=KV_Rbtree_exist(&global_rbtree,key);
-        #endif
+        ret=kv_exist(key);
         c->tlv_array[i].tag=TAG_RES;
         c->tlv_array[i].type=TYPE_STRING;
         char buf[BUFFER_SIZE]={0};
@@ -304,9 +318,33 @@ int kv_cmd_exist(kv_request_t req,result*c){
         }
     }
 }
+// 只执行命令，不做任何持久化
+int kv_cmd_execute(kv_request_t *req, result *c, int cmd) {
+    switch (cmd) {
+        case KV_CMD_SET:
+            kv_cmd_set(*req, c);
+            break;
+        case KV_CMD_GET:
+            kv_cmd_get(*req, c);
+            break;
+        case KV_CMD_MOD:
+            kv_cmd_mod(*req, c);
+            break;
+        case KV_CMD_DEL:
+            kv_cmd_del(*req, c);
+            break;
+        case KV_CMD_EXIST:
+            kv_cmd_exist(*req, c);
+            break;
+        default:
+            break;
+    }
+    return 0;
+}
+
 //>0表示处理了多少字节，<0 非法包，=0 包不完整
-//rlength这个包的长度
-int kv_protocol(char *msg,int rlength,result *c){//一个包一个包的处理
+//rlength这个包的长度,msg是rbuffer,里面全是包，函数处理一个包就返回
+int kv_protocol(char *msg,int rlength,result *c){//这个函数只能一个包一个包的处理
     if(rlength<10){
         return 0;
     }
@@ -321,8 +359,8 @@ int kv_protocol(char *msg,int rlength,result *c){//一个包一个包的处理
     uint8_t msg_type=header.msg_type;
     uint16_t opcode=header.opcode;
     uint32_t len=header.length;//一条命令的数据长度,也是这个payload消息的消息边界
-    // printf("rlength:%d\n",rlength);
-    // printf("header.length=%d\n",len);
+    printf("rlength:%d\n",rlength);
+    printf("header.length=%d\n",len);
     if(header.magic!=KV_MAGIC){//数据是脏数据
         return -1;
     }
@@ -331,11 +369,15 @@ int kv_protocol(char *msg,int rlength,result *c){//一个包一个包的处理
     }
     kv_request_t_init(&req);
     ret=kv_payload_decode(msg+offset,len,&req);//解析协议，结果处理到req中，里面都是key,value
-    offset+=ret;
-
+    
+    offset+=ret;//offset标记了这个包的边界
+    printf("kv_payload_decode return %d\n",ret);
+    printf("for\n");
     for(int i=0;i<req.key_num;i++){
-            printf("key:%s,length:%d\n",req.key[i]->data,req.key[i]->length);
-            printf("value:%s,length:%d\n",req.value[i]->data,req.value[i]->length);
+        printf("key:%s,length:%d\n",req.key[i]->data,req.key[i]->length);
+        if(i < req.value_num && req.value[i] && req.value[i]->data){
+        printf("value:%s, length:%d\n", req.value[i]->data, req.value[i]->length);
+    }
     }
     if(version==KV_VERSION){//版本
         if(msg_type==MSG_TYPE_REQ){//协议类型
@@ -362,30 +404,48 @@ int kv_protocol(char *msg,int rlength,result *c){//一个包一个包的处理
             }
             c->tlv_num=req.key_num;
             //c->res.tlv_num=req.data_num;
-            switch(cmd){
-                case KV_CMD_SET:
-                    kv_cmd_set(req,c);
-                    break;
-                case KV_CMD_GET:
-                    kv_cmd_get(req,c);
-                    break;
-                case KV_CMD_MOD:
-                    kv_cmd_mod(req,c);
-                    break;
-                case KV_CMD_DEL:
-                    kv_cmd_del(req,c);
-                    break;
-                case KV_CMD_EXIST:
-                    kv_cmd_exist(req,c);
-                    break;
-                default:
-                    break;
-            }
+            // switch(cmd){
+            //     case KV_CMD_SET:
+            //         aof_append(msg,offset);
+            //         kv_cmd_set(req,c);
+            //         break;
+            //     case KV_CMD_GET:
+            //         kv_cmd_get(req,c);
+            //         break;
+            //     case KV_CMD_MOD:
+            //         aof_append(msg,offset);
+            //         kv_cmd_mod(req,c);
+            //         break;
+            //     case KV_CMD_DEL:
+            //         aof_append(msg,offset);
+            //         kv_cmd_del(req,c);
+            //         break;
+            //     case KV_CMD_EXIST:
+            //         kv_cmd_exist(req,c);
+            //         break;
+            //     default:
+            //         break;
+            // }
+            switch (cmd) {
+    // 写操作：先写AOF，再执行
+            case KV_CMD_SET:
+            case KV_CMD_MOD:
+            case KV_CMD_DEL:
+                aof_append(msg, rlength);
+                kv_cmd_execute(&req, c, cmd);
+                break;
+                
+            // 读操作：直接执行，不写AOF
+            case KV_CMD_GET:
+            case KV_CMD_EXIST:
+                kv_cmd_execute(&req, c, cmd);
+                break;
+        }
+
             kv_request_t_destory(&req);
             return offset;//处理完了一个包，一个包一个包的处理
         }
     }
-return 0;
 }
 #else
 int kv_protocol(char *msg,int rlength,char *request){
@@ -397,6 +457,11 @@ int kv_protocol(char *msg,int rlength,char *request){
     return kv_filter_protocol(tokens,count,request);
 }
 #endif
+/*rbuffer:接受缓冲区，wbuffer:发送缓冲区，rlength:接受缓冲区的字节数，wlength:发送缓冲区的字节数
+    思路：在发送缓冲区中拿一个包出来解包kv_protocol()，解一包，结果放在res，解一个包生成d对应的响应，
+    响应放在协议放在res中，然后kv_response()将res中的响应组包放到发送缓冲区，都是以追加包的方式放到缓冲区。
+    kv_requeset返回处理了多少字节数据，格式要求严格，huan'cho
+ */
 int kv_request(char *rbuffer,char *wbuffer,int *rlength,int *wlength){//解包，协议编码，响应
     if((*rlength)<10){
         return 0;
@@ -427,11 +492,13 @@ int kv_request(char *rbuffer,char *wbuffer,int *rlength,int *wlength){//解包�
         }
         kv_free(res.tlv_array);
         int remain=(*rlength)-ret;
+        total_handled+=ret;
         if(remain>=0){
             memmove(rbuffer,rbuffer+ret,remain);//缓冲区前移
             (*rlength)=remain;//二进制协议数据靠长度变量标记数据边界
+            break;
         }
-        total_handled+=ret;
+        
     }
     return total_handled;
 }

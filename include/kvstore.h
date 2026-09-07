@@ -7,7 +7,7 @@
 #define ENGINE_ARRAY 0
 #define ENGINE_HASH 1
 #define ENGINE_RBTREE 2
-#define ENGINE ENGINE_RBTREE//控制启用哪一种引擎
+#define ENGINE ENGINE_ARRAY//控制启用哪一种引擎
 #define KV_COMPLEX 1
 #ifndef INFO
 #define INFO 
@@ -39,13 +39,16 @@
 */
 #include"mempool.h"
 
+#include"aof.h"
+
 
 #define KV_MAX_TOKENS 8
 
 
-// extern kv_array_t global_array;
-// extern KV_Map global_hash;
-// extern KV_Rbtree global_rbtree;
+extern kv_array_t global_array;
+extern KV_Map global_hash;
+extern KV_Rbtree global_rbtree;
+extern  Mempool_Manager *mempool;
 int kv_split_token(char *msg,char* tokens[]);
 int kv_protocol(char *msg,int len,result*c);
 int kv_filter_protocol(char **token,int count,char *response);
@@ -57,6 +60,12 @@ int kv_cmd_get(kv_request_t req,result*c);
 int kv_cmd_mod(kv_request_t req,result*c);
 int kv_cmd_del(kv_request_t req,result*c);
 int kv_cmd_exist(kv_request_t req,result*c);
+int kv_set(char *key,char *value);
+char *kv_get(char *key);
+int kv_mod(char *key,char *value);
+int kv_del(char *key);
+int kv_exist(char *key);
+int kv_cmd_execute(kv_request_t *req,result *c,int cmd);
 extern int reactor_entry(unsigned int port);
 extern int uring_start(unsigned int port);
 extern int nytco(unsigned int port);
