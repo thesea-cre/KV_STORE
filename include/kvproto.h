@@ -39,6 +39,7 @@ typedef struct tlv{
     uint32_t length;//数据长度
     uint8_t *value;//数据部分
 }TLV;//定义的协议单元，tag标识是key，还是value,还是回应res
+//2+1+4=7
 typedef struct{
     char *data;
     uint8_t type;

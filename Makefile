@@ -19,6 +19,7 @@
 # 	-D_GNU_SOURCE \
 # 	-mcmodel=large \
 # 	-I/home/snow/share/KV_STORE/include \
+
 # 	-g
 # LDFLAGS= -L/home/snow/share/KV_STORE/lib/liburing/src -luring -ldl -lpthread
 # TESTCASE_SRC=testcase.c 
@@ -52,7 +53,7 @@ CFLAGS := -I/home/snow/share/KV_STORE/lib/liburing/src/include \
           -D_GNU_SOURCE \
           -mcmodel=large \
           -I/home/snow/share/KV_STORE/include \
-          -g
+          -g -mcmodel=medium
 LDFLAGS  := -L/home/snow/share/KV_STORE/lib/liburing/src -luring -ldl -lpthread
 
 OBJ_DIR := obj
@@ -71,7 +72,8 @@ COMMON_SRCS := \
     network/nytco.c \
     mempool/mempool.c \
     log/log.c \
-    AOF/aof.c
+    AOF/aof.c \
+	SYNC/sync.c
 
 # 后缀替换 + 路径处理
 TEMP_OBJS := $(COMMON_SRCS:.c=.o)
@@ -79,7 +81,7 @@ TEMP_OBJS := $(TEMP_OBJS:.S=.o)
 COMMON_OBJS := $(addprefix $(OBJ_DIR)/, $(notdir $(TEMP_OBJS)))
 
 # 源文件搜索路径（模式规则的核心配套）
-VPATH := protocol:engine:network/nytco:network:mempool:log:AOF
+VPATH := protocol:engine:network/nytco:network:mempool:log:AOF:SYNC
 
 all: $(OBJ_DIR) $(COMMON_OBJS)
 

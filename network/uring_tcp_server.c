@@ -47,7 +47,7 @@ int uring_init_server(unsigned int port){
     return socketfd;
 }
 int set_event_send(struct io_uring*ring,int fd,void*buf,size_t len,int flag){
-     struct io_uring_sqe* sqe=io_uring_get_sqe(ring);
+     struct io_uring_sqe* sqe=io_uring_get_sqe(ring);//从ring中拿一个sqe，
      struct conn_info conn={
         .fd=fd,
         .event=EVENT_SEND,
@@ -105,7 +105,7 @@ int set_event_accept(struct io_uring*ring,int fd,struct sockaddr* addr,socklen_t
 //     set_event_accept(Arg->ring,Arg->fd,Arg->addr,Arg->addrlen,Arg->flag);
 // }
 int uring_start(unsigned int port){
-    struct io_uring_params params;//
+    struct io_uring_params params;//设置ring的参数结构体
     memset(&params,0,sizeof(struct io_uring_params));
     struct io_uring ring;
     int ret= io_uring_queue_init_params(ENTRIES_LENGTH,&ring,&params);//params是这个函数的配置入参，内核把输出信息写回这个结构体
@@ -123,7 +123,7 @@ int uring_start(unsigned int port){
     // char res_buf[BUFFER_SIZE]={0};
     // char buf[BUFFER_SIZE]={0};
     while(1){
-        io_uring_submit(&ring);//提交给执行
+        io_uring_submit(&ring);//提交给内核，内核将这些请求放入一个队列等待执行
         struct io_uring_cqe* cqe;
         io_uring_wait_cqe(&ring,&cqe);//
         struct io_uring_cqe* cqes[128];//128个io事件

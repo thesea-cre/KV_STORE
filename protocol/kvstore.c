@@ -1,4 +1,5 @@
 #include"kvstore.h"
+#include"sync.h"
 kv_array_t global_array;
 KV_Map global_hash;
 KV_Rbtree global_rbtree;
@@ -7,136 +8,16 @@ void *kv_malloc(size_t size){//用的很多的系统函数最好包装一层，�
     #if 1
     return malloc(size);
     #else 
-    return Managerpool_Alloc(msg,size);
+    return Managerpool_Alloc(mempool,size);
     #endif
 }
 void kv_free(void* ptr){
     #if 1
     return free(ptr);
     #else
-    return Managerpool_free(msg,ptr);
+    return Managerpool_free(mempool,ptr);
     #endif
 }
-int kv_split_token(char *msg,char* tokens[]){
-    if(msg==NULL||tokens==NULL) return -1;
-    int i=0;
-    char *token=strtok(msg," ");
-    while(token!=NULL){
-        tokens[i++]=token;
-        token=strtok(NULL," ");
-    }
-    return i;
-}
-int kv_filter_protocol(char **tokens,int count,char *response){
-    if(tokens==NULL||count<=0||response==NULL){
-      //  printf("kv_filter_protocol\n");
-        return -1;
-    }
-    int flag=0;
-    int cmd;
-    for(cmd=KV_CMD_START;cmd<KV_CMD_COUNT;cmd++){
-        if(strcmp(tokens[0],command[cmd])==0){
-            flag=1;
-            break;
-        }
-    }
-    if(flag==0){
-       // printf("not kv_protocol\n");
-        exit(1);
-    }
-    char*key=tokens[1];
-    //printf("key:%s\n",key);
-    char *value=tokens[2];
-    //printf("value:%s\n",value);
-    int ret;
-    int length=0;
-    switch(cmd){
-        case KV_CMD_SET:
-            #if ENGINE==ENGINE_ARRAY
-            ret=kv_array_set(&global_array,key,value);
-            #elif ENGINE==ENGINE_HASH
-            ret=KV_Map_set(&global_hash,key,value);
-            #elif ENGINE==ENGINE_RBTREE
-            ret=KV_Rbtree_set(&global_rbtree,key,value);
-            #endif
-            if(ret==0){
-                length=sprintf(response,"OK\r\n");
-            }else if(ret>0){
-                length=sprintf(response,"EXIST\r\n");
-            }else{
-                length=sprintf(response,"ERROR\r\n");
-            }
-            break;
-        case KV_CMD_GET:
-            #if ENGINE==ENGINE_ARRAY
-            char *v=kv_array_get(&global_array,key);
-            #elif ENGINE==ENGINE_HASH
-            char *v=KV_Map_get(&global_hash,key);
-            #elif ENGINE==ENGINE_RBTREE
-            char *v =KV_Rbtree_get(&global_rbtree,key);
-            #endif
-            if(v==NULL){
-                length=sprintf(response,"NO EXIST\r\n");
-            }else{
-                length=sprintf(response,"%s\r\n",v);
-            }
-            break;
-        case KV_CMD_DEL:
-            #if ENGINE==ENGINE_ARRAY
-            ret=kv_array_del(&global_array,key);
-            #elif ENGINE==ENGINE_HASH
-            ret=KV_Map_del(&global_hash,key);
-            #elif ENGINE==ENGINE_RBTREE
-            ret=KV_Rbtree_del(&global_rbtree,key);
-            #endif
-            if(ret==0){
-                length=sprintf(response,"OK\r\n");
-            }else if(ret>0){
-                length=sprintf(response,"NO EXIST\r\n");
-            }else{
-                length=sprintf(response,"ERROR\r\n");
-            }
-            break;
-        case KV_CMD_MOD:
-            #if ENGINE==ENGINE_ARRAY
-            ret=kv_array_mod(&global_array,key,value);
-            #elif ENGINE==ENGINE_HASH
-            ret=KV_Map_mod(&global_hash,key,value);
-            #elif ENGINE==ENGINE_RBTREE
-            ret=KV_Rbtree_mod(&global_rbtree,key,value);
-            #endif
-            if(ret==0){
-                length=sprintf(response,"OK\r\n");
-            }else if(ret>0){
-                length=sprintf(response,"NO EXIST\r\n");
-            }else{
-                length=sprintf(response,"ERROR\r\n");
-            }
-            break;
-        case KV_CMD_EXIST:
-            #if ENGINE==ENGINE_ARRAY
-            ret=kv_array_exist(&global_array,key);
-            #elif ENGINE==ENGINE_HASH
-            ret=KV_Map_exist(&global_hash,key);
-            #elif ENGINE==ENGINE_RBTREE
-            ret=KV_Rbtree_exist(&global_rbtree,key);
-            #endif
-            if(ret>0){
-                length=sprintf(response,"EXIST\r\n");
-            }else if(ret==0){
-                length=sprintf(response,"NO EXIST\r\n");
-            }else if(ret<0){
-                length=sprintf(response,"ERROR\r\n");
-            }
-            break;
-        default:
-            assert(0);
-            break;
-    }
-    return length;
-}
-#if KV_COMPLEX
-
 int kv_set(char *key,char *value){//做一个适配层，对外接口适用，隐藏核心层的选择，这样测试模块方便一点
     int ret;
     #if ENGINE==ENGINE_ARRAY
@@ -318,12 +199,37 @@ int kv_cmd_exist(kv_request_t req,result*c){
         }
     }
 }
+//
+int kv_response_expectation(kv_request_t req,result*c,int cmd){
+    c->tlv_array=(TLV*)kv_malloc(c->tlv_num*sizeof(TLV));
+    for(int i=0;i<req.key_num;i++){
+        char *key=req.key[i]->data;
+        //ret=kv_exist(key);
+        c->tlv_array[i].tag=TAG_RES;
+        c->tlv_array[i].type=TYPE_STRING;
+        char buf[BUFFER_SIZE]={0};
+        switch (cmd){
+            case KV_CMD_GET:
+            case KV_CMD_EXIST:
+                c->tlv_array[i].length=sprintf(buf,"this server do not support read\r\n");
+                break;
+            case KV_CMD_SET:
+            case KV_CMD_MOD:
+            case KV_CMD_DEL:
+                c->tlv_array[i].length=sprintf(buf,"this server do not support write\r\n");
+                break;
+        }
+        c->tlv_array[i].value=(char *)kv_malloc(c->tlv_array[i].length);
+        memcpy(c->tlv_array[i].value,buf,c->tlv_array[i].length);
+    }
+    return 0;
+}
 // 只执行命令，不做任何持久化
 int kv_cmd_execute(kv_request_t *req, result *c, int cmd) {
     switch (cmd) {
         case KV_CMD_SET:
             kv_cmd_set(*req, c);
-            break;
+            break; 
         case KV_CMD_GET:
             kv_cmd_get(*req, c);
             break;
@@ -341,12 +247,11 @@ int kv_cmd_execute(kv_request_t *req, result *c, int cmd) {
     }
     return 0;
 }
-
-//>0表示处理了多少字节，<0 非法包，=0 包不完整
-//rlength这个包的长度,msg是rbuffer,里面全是包，函数处理一个包就返回
+//>0表示处理了多少字节，-2 非法包，=-1 包不完整
+//rlength:msg的长度,msg是rbuffer,里面全是包，函数处理一个包就返回
 int kv_protocol(char *msg,int rlength,result *c){//这个函数只能一个包一个包的处理
     if(rlength<10){
-        return 0;
+        return -1;
     }
     int offset=0;
     int ret=0;
@@ -359,26 +264,25 @@ int kv_protocol(char *msg,int rlength,result *c){//这个函数只能一个包�
     uint8_t msg_type=header.msg_type;
     uint16_t opcode=header.opcode;
     uint32_t len=header.length;//一条命令的数据长度,也是这个payload消息的消息边界
-    printf("rlength:%d\n",rlength);
-    printf("header.length=%d\n",len);
+    INFO("rlength:%d\n",rlength);
+    INFO("header.length=%d\n",len);
     if(header.magic!=KV_MAGIC){//数据是脏数据
-        return -1;
+        return -2;
     }
     if(rlength-10<len){//解析出头部，等包完整后才继续处理
-        return 0;
+        return -1;
     }
     kv_request_t_init(&req);
     ret=kv_payload_decode(msg+offset,len,&req);//解析协议，结果处理到req中，里面都是key,value
-    
     offset+=ret;//offset标记了这个包的边界
-    printf("kv_payload_decode return %d\n",ret);
+    INFO("kv_payload_decode return %d\n",ret);
     printf("for\n");
-    for(int i=0;i<req.key_num;i++){
-        printf("key:%s,length:%d\n",req.key[i]->data,req.key[i]->length);
-        if(i < req.value_num && req.value[i] && req.value[i]->data){
-        printf("value:%s, length:%d\n", req.value[i]->data, req.value[i]->length);
-    }
-    }
+    // for(int i=0;i<req.key_num;i++){
+    //     INFO("key:%s,length:%d\n",req.key[i]->data,req.key[i]->length);
+    //     if(i < req.value_num && req.value[i] && req.value[i]->data){
+    //     INFO("value:%s, length:%d\n", req.value[i]->data, req.value[i]->length);
+    // }
+    // }
     if(version==KV_VERSION){//版本
         if(msg_type==MSG_TYPE_REQ){//协议类型
             int flag=0;
@@ -386,12 +290,12 @@ int kv_protocol(char *msg,int rlength,result *c){//这个函数只能一个包�
             for(cmd=KV_CMD_START;cmd<KV_CMD_COUNT;cmd++){
                 if(strcmp(command[opcode],command[cmd])==0){
                     flag=1;
-                    printf("command:%s\n",command[cmd]);
+                    INFO("command:%s\n",command[cmd]);
                     break;
                     }
             }
             if(flag==0) {
-                printf("命令输入错误\n");
+                INFO("命令输入错误\n");
                 char buf[BUFFER_SIZE]="命令输入错误";
                 c->tlv_num=1;
                 c->tlv_array=(TLV*)kv_malloc(c->tlv_num*sizeof(TLV));
@@ -403,42 +307,35 @@ int kv_protocol(char *msg,int rlength,result *c){//这个函数只能一个包�
                 exit(1);
             }
             c->tlv_num=req.key_num;
-            //c->res.tlv_num=req.data_num;
-            // switch(cmd){
-            //     case KV_CMD_SET:
-            //         aof_append(msg,offset);
-            //         kv_cmd_set(req,c);
-            //         break;
-            //     case KV_CMD_GET:
-            //         kv_cmd_get(req,c);
-            //         break;
-            //     case KV_CMD_MOD:
-            //         aof_append(msg,offset);
-            //         kv_cmd_mod(req,c);
-            //         break;
-            //     case KV_CMD_DEL:
-            //         aof_append(msg,offset);
-            //         kv_cmd_del(req,c);
-            //         break;
-            //     case KV_CMD_EXIST:
-            //         kv_cmd_exist(req,c);
-            //         break;
-            //     default:
-            //         break;
-            // }
             switch (cmd) {
     // 写操作：先写AOF，再执行
             case KV_CMD_SET:
             case KV_CMD_MOD:
             case KV_CMD_DEL:
-                aof_append(msg, rlength);
-                kv_cmd_execute(&req, c, cmd);
+                if(s_or_c==0){
+                    aof_append(msg, offset);                       // 单包长，防粘包把剩余缓冲区写进AOF
+                    kv_cmd_execute(&req, c, cmd);
+                    master_append_cmd(&mgr,(uint8_t*)msg,offset);
+                    master_notify_slaves(&mgr);
+                }else if(s_or_c==1){
+                    kv_response_expectation(req,c,cmd);
+                }else{
+                    aof_append(msg, rlength);
+                    kv_cmd_execute(&req, c, cmd);
+                }
                 break;
                 
             // 读操作：直接执行，不写AOF
             case KV_CMD_GET:
             case KV_CMD_EXIST:
-                kv_cmd_execute(&req, c, cmd);
+                if(s_or_c==0){
+                    kv_response_expectation(req,c,cmd);
+                }else if(s_or_c==1){
+                    kv_cmd_execute(&req,c,cmd);
+                }else{
+                    kv_cmd_execute(&req, c, cmd);
+                }
+                
                 break;
         }
 
@@ -447,37 +344,49 @@ int kv_protocol(char *msg,int rlength,result *c){//这个函数只能一个包�
         }
     }
 }
-#else
-int kv_protocol(char *msg,int rlength,char *request){
-    if(msg==NULL||rlength<=0||request==NULL) {
+
+/*rbuffer:接受缓冲区，wbuffer:发送缓冲区，rlength:接受缓冲区的字节数，wlength:发送缓冲区的字节数
+    思路：在发送缓冲区中拿一个包出来解包kv_protocol()，解一TLV，结果放在res，解一个TLV生成d对应的响应信息，
+    响应信息放放在res中，然后kv_response()将res中的响应信息组成TLV放到发送缓冲区，都是以追加包的方式放到缓冲区。
+    kv_requeset返回处理了多少字节数据，格式要求严格.
+ */
+ //-2:错误。-1:不完整TLV。0 处理完了rbuffer里的所有TLV。>0:处理了的所有数据长度，wbuffer满了
+ //考虑了wbuffer满的情况。
+int kv_request(char *rbuffer,char *wbuffer,int rlength,int *wlength){//解包，协议编码，响应
+    if((rlength)<10){
         return -1;
     }
-    char *tokens
-    int count=kv_split_token(msg,tokens);
-    return kv_filter_protocol(tokens,count,request);
-}
-#endif
-/*rbuffer:接受缓冲区，wbuffer:发送缓冲区，rlength:接受缓冲区的字节数，wlength:发送缓冲区的字节数
-    思路：在发送缓冲区中拿一个包出来解包kv_protocol()，解一包，结果放在res，解一个包生成d对应的响应，
-    响应放在协议放在res中，然后kv_response()将res中的响应组包放到发送缓冲区，都是以追加包的方式放到缓冲区。
-    kv_requeset返回处理了多少字节数据，格式要求严格，huan'cho
- */
-int kv_request(char *rbuffer,char *wbuffer,int *rlength,int *wlength){//解包，协议编码，响应
-    if((*rlength)<10){
-        return 0;
-    }
     int total_handled=0;
+    
      while(1){//循环解包
+        if(rlength==total_handled){
+            return 0;
+        }
         int ret;
         struct result res;
         memset(&res,0,sizeof(struct result));
-        ret=kv_protocol(rbuffer,(*rlength),&res);
+        // if(s_or_c==0){
+        //     ret=kv_master_protocol(rbuffer+total_handled,(rlength)-total_handled,&res);
+        // }else if(s_or_c==1){
+        //     ret=kv_slave_protocol(rbuffer+total_handled,(rlength)-total_handled,&res);
+        // }else{
+        //     ret=kv_protocol(rbuffer+total_handled,(rlength)-total_handled,&res);
+        // }
+        ret=kv_protocol(rbuffer+total_handled,(rlength)-total_handled,&res);
         printf("kv_protocol return %d\n",ret);
-        if(ret==0){//非法包，包不完整
-            break;
-        }
-        if(ret<0){
+        if(ret==-1){//包不完整
+            for(int i=0;i<res.tlv_num;i++){
+                kv_free(res.tlv_array[i].value);
+            }
+            kv_free(res.tlv_array);
             return -1;
+        }
+        if(ret==-2){//非法包
+            for(int i=0;i<res.tlv_num;i++){
+                kv_free(res.tlv_array[i].value);
+            }
+            kv_free(res.tlv_array);
+            return -2;
         }
         char tmp_buf[BUFFER_SIZE]={0};
         int res_ret=kv_response(tmp_buf,BUFFER_SIZE,&res);//响应先写到暂时的缓冲区中
@@ -491,16 +400,102 @@ int kv_request(char *rbuffer,char *wbuffer,int *rlength,int *wlength){//解包�
             kv_free(res.tlv_array[i].value);
         }
         kv_free(res.tlv_array);
-        int remain=(*rlength)-ret;
         total_handled+=ret;
-        if(remain>=0){
-            memmove(rbuffer,rbuffer+ret,remain);//缓冲区前移
-            (*rlength)=remain;//二进制协议数据靠长度变量标记数据边界
-            break;
-        }
-        
     }
     return total_handled;
+}
+// int kv_incremental(char *rbuffer,int rlength){//解包，协议编码，响应
+//     if((rlength)<10){
+//         return -1;
+//     }
+//     int ret=0;
+//     int offset=0;
+//      while(rlength-offset>=10){//循环解包，剩余不足一个包头就停，尾部留给下一段数据
+//         struct result res;
+//         memset(&res,0,sizeof(struct result));
+//         INFO("没有处理的数据长度:%d(bytes)\n",rlength-offset);
+//         // 
+     
+
+//         //
+//         if(ret<=0){//-1不完整/-2非法：已消费的部分照常返回，不整包丢弃
+//             break;
+//         }
+//          offset+=ret;
+//          INFO("处理了%d(bytes)的数据\n",offset);
+//         for(int i=0;i<res.tlv_num;i++){
+//             kv_free(res.tlv_array[i].value);
+//         }
+//         kv_free(res.tlv_array);
+//     }
+//     return offset; 
+// }
+int kv_incremental(char *rbuffer, int rlength) {
+    if (rlength < 10) {
+        return -1; // 连包头都不够，等下一段数据
+    }
+    
+    int offset = 0;
+    // 循环解包，直到剩余数据不足一个完整的包
+    while (rlength - offset >= 10) {
+        kv_header_t header;
+        memset(&header, 0, sizeof(kv_header_t));
+        
+        // 1. 解析头部
+        int head_ret = kv_header_decode((const uint8_t*)(rbuffer + offset), rlength - offset, &header);
+        if (header.magic != KV_MAGIC) {
+            INFO("kv_incremental: bad magic\n");
+            break; // 脏数据，停止处理，避免死循环
+        }
+        
+        int packet_len = header.length + 10; // 10字节头部 + 数据长度
+        
+        // 2. 判断包是否完整
+        if (rlength - offset < packet_len) {
+            break; // 半包，留给下一段数据拼接
+        }
+
+        // 3. 解析 Payload
+        kv_request_t req;
+        kv_request_t_init(&req);
+        int payload_ret = kv_payload_decode(rbuffer + offset + 10, header.length, &req);
+
+        // 4. 识别命令类型
+        int cmd;
+        int flag = 0;
+        for (cmd = KV_CMD_START; cmd < KV_CMD_COUNT; cmd++) {
+            if (strcmp(command[header.opcode], command[cmd]) == 0) {
+                flag = 1;
+                break;
+            }
+        }
+
+        if (flag) {
+            // 5. 增量补发只处理写命令（SET/MOD/DEL），需要执行并落盘
+            if (cmd == KV_CMD_SET || cmd == KV_CMD_MOD || cmd == KV_CMD_DEL) {
+                // 【关键修复1】写入本地 AOF 文件（防止重启后数据丢失）
+                aof_append(rbuffer + offset, packet_len);
+                
+                // 【关键修复2】直接调用执行引擎，更新内存
+                result res;
+                memset(&res, 0, sizeof(result));
+                res.tlv_num = req.key_num; // 
+                
+                kv_cmd_execute(&req, &res, cmd);
+                
+                // 【关键修复3】释放执行过程中分配的内存
+                for (uint32_t i = 0; i < res.tlv_num; i++) {
+                    kv_free(res.tlv_array[i].value);
+                }
+                kv_free(res.tlv_array);
+            }
+        }
+        
+        kv_request_t_destory(&req);
+        offset += packet_len; // 严格按包长移动偏移量
+    }
+    
+    return offset; // 返回实际处理的字节数，未处理的残包留给下次recv
 }
 int kv_response(char *wbuffer,int len,result *c){
     int offset=0;
