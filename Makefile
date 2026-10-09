@@ -54,7 +54,7 @@ CFLAGS := -I/home/snow/share/KV_STORE/lib/liburing/src/include \
           -mcmodel=large \
           -I/home/snow/share/KV_STORE/include \
           -g -mcmodel=medium
-LDFLAGS  := -L/home/snow/share/KV_STORE/lib/liburing/src -luring -ldl -lpthread
+LDFLAGS  := -L/home/snow/share/KV_STORE/lib/liburing/src -luring -ldl -lpthread -ljemalloc
 
 OBJ_DIR := obj
 

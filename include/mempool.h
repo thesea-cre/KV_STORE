@@ -18,6 +18,7 @@ typedef struct MemBlock{
 typedef struct Mempool{
     char *pbuffer;//整个内存池的指针
     MemBlock *header;//第一个内存块
+    MemBlock* core_list;
     size_t nSize;//每个块大小
     size_t nBlock;//块数量
    // Mempool_Manager* manager;//内存池的管理员
@@ -31,18 +32,17 @@ typedef struct Mempool_Manager{
 
 }Mempool_Manager;
 typedef enum{
-    _USE,
-    _NOT_USE
+    _USE=1,
+    _NOT_USE=0
 }Use_Status;
 typedef enum{
-    _POOL,
-    _CORE
+    _POOL=0,
+    _CORE=1
 }Belong_Status;
 Mempool * Mempool_create(size_t size,size_t block);
 void Mempool_destory(Mempool* pool);
 void * Mempool_Alloc(Mempool*pool,size_t size);
 void Mempool_free(Mempool* pool,void *ptr);
-void Mempool_Init(Mempool* pool);
 
 Mempool_Manager* Managerpool_GetInstance(void);
 void * Managerpool_Alloc(Mempool_Manager* msg,size_t nsize);

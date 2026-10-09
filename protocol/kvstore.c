@@ -1,5 +1,6 @@
 #include"kvstore.h"
 #include"sync.h"
+#include <jemalloc/jemalloc.h>
 kv_array_t global_array;
 KV_Map global_hash;
 KV_Rbtree global_rbtree;
@@ -7,15 +8,19 @@ Mempool_Manager *mempool;
 void *kv_malloc(size_t size){//用的很多的系统函数最好包装一层，为了修改方便
     #if 1
     return malloc(size);
-    #else 
+    #elif 0
     return Managerpool_Alloc(mempool,size);
+    #elif 0
+    return je_malloc(size);
     #endif
 }
 void kv_free(void* ptr){
     #if 1
     return free(ptr);
-    #else
+    #elif 0
     return Managerpool_free(mempool,ptr);
+    #elif 0
+    return je_free(ptr);
     #endif
 }
 int kv_set(char *key,char *value){//做一个适配层，对外接口适用，隐藏核心层的选择，这样测试模块方便一点
@@ -304,7 +309,7 @@ int kv_protocol(char *msg,int rlength,result *c){//这个函数只能一个包�
                 c->tlv_array[0].value=(char *)kv_malloc(strlen(buf)+1);
                 c->tlv_array[0].length=strlen(buf)+1;
                 memcpy(c->tlv_array[0].value,buf,c->tlv_array[0].length);
-                exit(1);
+                return -2;
             }
             c->tlv_num=req.key_num;
             switch (cmd) {
@@ -320,12 +325,12 @@ int kv_protocol(char *msg,int rlength,result *c){//这个函数只能一个包�
                 }else if(s_or_c==1){
                     kv_response_expectation(req,c,cmd);
                 }else{
-                    aof_append(msg, rlength);
+                    aof_append(msg, offset);
                     kv_cmd_execute(&req, c, cmd);
                 }
                 break;
                 
-            // 读操作：直接执行，不写AOF
+            // 读操作：不写AOF；读写分离——主节点拒读，从节点放行，单机放行
             case KV_CMD_GET:
             case KV_CMD_EXIST:
                 if(s_or_c==0){
@@ -343,6 +348,7 @@ int kv_protocol(char *msg,int rlength,result *c){//这个函数只能一个包�
             return offset;//处理完了一个包，一个包一个包的处理
         }
     }
+    return -2;
 }
 
 /*rbuffer:接受缓冲区，wbuffer:发送缓冲区，rlength:接受缓冲区的字节数，wlength:发送缓冲区的字节数
@@ -404,32 +410,7 @@ int kv_request(char *rbuffer,char *wbuffer,int rlength,int *wlength){//解包，
     }
     return total_handled;
 }
-// int kv_incremental(char *rbuffer,int rlength){//解包，协议编码，响应
-//     if((rlength)<10){
-//         return -1;
-//     }
-//     int ret=0;
-//     int offset=0;
-//      while(rlength-offset>=10){//循环解包，剩余不足一个包头就停，尾部留给下一段数据
-//         struct result res;
-//         memset(&res,0,sizeof(struct result));
-//         INFO("没有处理的数据长度:%d(bytes)\n",rlength-offset);
-//         // 
-     
 
-//         //
-//         if(ret<=0){//-1不完整/-2非法：已消费的部分照常返回，不整包丢弃
-//             break;
-//         }
-//          offset+=ret;
-//          INFO("处理了%d(bytes)的数据\n",offset);
-//         for(int i=0;i<res.tlv_num;i++){
-//             kv_free(res.tlv_array[i].value);
-//         }
-//         kv_free(res.tlv_array);
-//     }
-//     return offset; 
-// }
 int kv_incremental(char *rbuffer, int rlength) {
     if (rlength < 10) {
         return -1; // 连包头都不够，等下一段数据

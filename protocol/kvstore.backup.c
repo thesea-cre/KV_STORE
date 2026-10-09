@@ -282,3 +282,29 @@
 //     int count=kv_split_token(msg,tokens);
 //     return kv_filter_protocol(tokens,count,request);
 // }
+// int kv_incremental(char *rbuffer,int rlength){//解包，协议编码，响应
+//     if((rlength)<10){
+//         return -1;
+//     }
+//     int ret=0;
+//     int offset=0;
+//      while(rlength-offset>=10){//循环解包，剩余不足一个包头就停，尾部留给下一段数据
+//         struct result res;
+//         memset(&res,0,sizeof(struct result));
+//         INFO("没有处理的数据长度:%d(bytes)\n",rlength-offset);
+//         // 
+     
+
+//         //
+//         if(ret<=0){//-1不完整/-2非法：已消费的部分照常返回，不整包丢弃
+//             break;
+//         }
+//          offset+=ret;
+//          INFO("处理了%d(bytes)的数据\n",offset);
+//         for(int i=0;i<res.tlv_num;i++){
+//             kv_free(res.tlv_array[i].value);
+//         }
+//         kv_free(res.tlv_array);
+//     }
+//     return offset; 
+// }

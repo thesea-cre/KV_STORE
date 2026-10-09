@@ -80,6 +80,7 @@ uint64_t master_online_sync(MasterMgr *mgr, Slaveconn* slave, uint8_t *buf,uint3
 void master_notify_slaves(MasterMgr *mgr);
 //void master_check_timeout(MasterMgr* mgr, time_t now);
 Slaveconn* slave_find_by_fd(MasterMgr *mgr,int fd);
+void slave_remove_by_fd(MasterMgr *mgr, int fd);
 
 // 从节点函数
 int slave_init(Slave *slave);

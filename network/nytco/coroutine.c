@@ -178,6 +178,29 @@ void co_yield(coroutine* cor){
     co_swap_ctx(&cor->ctx, &cor->main->main_ctx);
     #endif
 }
+// 当前协程进入SLEEP挂起，直到别的协程co_cond_signal(fd)把它唤醒
+void co_cond_sleep(void){
+    coroutine* cor=tls_sched->current;
+    cor->status=SLEEP;
+    cor->main->co_sleeping++;
+    list_add_tail(&cor->sleep_node,&tls_sched->sleep_queue);
+    co_yield(cor);
+    //被signal唤醒后从这里继续
+}
+// 按fd唤醒SLEEP态协程（挪回就绪队列）；目标不在SLEEP态（运行中/等IO/已就绪）返回-1，
+// 调用方忽略：数据已在积压区，协程下一轮发数据时自然会取到，唤醒不丢
+int co_cond_signal(int fd){
+    schedule* sched=tls_sched;
+    coroutine* cor=sched->co_list[fd];
+    if(cor&&cor->status==SLEEP){
+        list_del(&cor->sleep_node);
+        cor->status=NREADY;
+        sched->co_sleeping--;
+        list_add_tail(&cor->ready_node,&sched->ready_queue);
+        return 0;
+    }
+    return -1;
+}
 void co_resume(coroutine *cor){
     INFO("进入co_resume,fd=%d\n",cor->fd);
     cor->main->current = cor;
@@ -187,7 +210,7 @@ void co_resume(coroutine *cor){
     #else
     co_swap_ctx(&cor->main->main_ctx, &cor->ctx);
     #endif
-    cor->main->current = NULL;
+    cor->main->current = NULL;//这个有点不懂
 }
 void exec(void* lt){
     coroutine *cor =(coroutine*)lt;
@@ -198,6 +221,7 @@ void exec(void* lt){
     // swapcontext(&cor->ctx,&cor->main->main_ctx);
     co_yield(cor);
 }
+/*初始化协程结构体字段，保存上下文，然后挂载就绪链表 */
 coroutine* create_cor(schedule* sched,int fd,void (*func)(void *),void *arg){
     coroutine *cor=(coroutine*)malloc(sizeof(coroutine));
     memset(cor, 0, sizeof(coroutine));
@@ -210,18 +234,19 @@ coroutine* create_cor(schedule* sched,int fd,void (*func)(void *),void *arg){
     sched->co_list[fd]=cor;
     cor->status=NREADY;
     #if UCONTEXT
-    getcontext(&cor->ctx);
+    getcontext(&cor->ctx);//初始化上下文
     cor->ctx.uc_stack.ss_sp=cor->stack;
     cor->ctx.uc_stack.ss_size=cor->stack_size;
-    cor->ctx.uc_link=&sched->main_ctx;
-    makecontext(&cor->ctx,(void(*)(void))exec,1,(void*)cor);
+    cor->ctx.uc_link=&sched->main_ctx;//有点搞忘了这三步在干什么了
+    makecontext(&cor->ctx,(void(*)(void))exec,1,(void*)cor);//保存上下文
     #else
     //co_get_ctx(&cor->ctx);
-    co_make_ctx(&cor->ctx, cor->stack, cor->stack_size, (void(*)(void*))exec, cor);
+    co_make_ctx(&cor->ctx, cor->stack, cor->stack_size, (void(*)(void*))exec, cor);//汇编级保存上下文
     #endif
-    list_add_tail(&cor->ready_node, &sched->ready_queue);
+    list_add_tail(&cor->ready_node, &sched->ready_queue);//加入就绪链表中
     return cor;
 }
+/*初始化调度器结构体，初始化主协程 */
 schedule* sched_create(void){
     schedule* sched=(schedule*)malloc(sizeof(schedule));
     #if UCONTEXT
@@ -230,10 +255,12 @@ schedule* sched_create(void){
     sched->current=NULL;
     sched->co_total=0;
     sched->co_waiting=0;
+    sched->co_sleeping=0;
     sched->epfd=epoll_create(1);
     memset(&sched->events,0,EPOLL_EVENT);
     memset(&sched->co_list,0,CO_LIST);
     INIT_LIST_HEAD(&sched->ready_queue);
+    INIT_LIST_HEAD(&sched->sleep_queue);
     sched->rb_wait = (struct rb_root)RB_ROOT_INIT;
     return sched;
 }
@@ -302,9 +329,6 @@ void print_ready_queue_safe(schedule* sched) {
 
 static void sched_process_io(schedule* sched, int nfds)
 {
-    // printf("当前树中序：");
-    // rb_dump(sched->rb_wait.rb_node);
-    // printf("\n");
     for (int i = 0; i < nfds; i++) {
         int fd = sched->events[i].data.fd;
         struct rb_node* node = rb_find(&sched->rb_wait, &fd, cmp_fd_key);
@@ -354,6 +378,7 @@ static void sched_run_ready(schedule* sched)
     }
 
 }
+
 void sched_loop(schedule* sched){
     tls_sched=sched;
     while(1){
@@ -363,7 +388,8 @@ void sched_loop(schedule* sched){
             INFO("exit sched_run_ready\n");
         }
          if (rb_empty(&sched->rb_wait)) {
-            break;
+            break;//没有等IO的协程，epoll_wait毫无意义（epoll只注册IO等待的fd）；
+            //SLEEP的协程只能被别的协程signal唤醒，能走到这说明别的协程也都空了，收工
         }
         INFO("等待io事件\n");
         int nfds=epoll_wait(sched->epfd,sched->events,EPOLL_EVENT,-1);

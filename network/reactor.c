@@ -10,6 +10,7 @@
 #include<sys/time.h>
 #include"reactor.h"
 #include"sync.h"
+#if NETWORK_SELECT == ENABLE_REACTOR//只在选中epoll时编译，与uring_tcp_server.c互斥，避免同名函数撞链接
 #define INFO printf
 int epfd;//定义一个全局的epoll
 int accept_cb(int fd,void *arg);
@@ -107,7 +108,7 @@ int connect_server(void){
     if(connect(socketfd,(struct sockaddr*)&addr,sizeof(struct sockaddr_in))<0){
         perror("connect");
         return -1;
-    }
+    }//connect自动帮你填自己的ip,port,也可以自己bind
     return socketfd;
 }
 int set_event(int fd,int event){//传fd和要设置的事件类型，设置fd监听事件类型，然后加入到epoll中
@@ -213,8 +214,6 @@ int recv_cb(int fd,void *arg){//流控，应用层反压，分包
     char  buf[BUFFER_SIZE]={0};
     int ret;
     ret=recv(fd,buf,BUFFER_SIZE,0);//先recv到暂时缓冲区
-    printf("收包长度：%d",ret);
-    hex_dump(buf,ret,"服务端收\n");
     if(ret<0){
         perror("recv");
         cancel_event(fd);
@@ -228,6 +227,8 @@ int recv_cb(int fd,void *arg){//流控，应用层反压，分包
         close(fd);
         return 0;
     }else{
+        printf("收包长度：%d",ret);
+        hex_dump(buf,ret,"服务端收\n");
         if(connection[fd].rlength>0){
             if(connection[fd].rlength+ret>BUFFER_SIZE){
                 cancel_event(fd);
@@ -240,6 +241,8 @@ int recv_cb(int fd,void *arg){//流控，应用层反压，分包
             INFO("recv from clientfd:clientfd--> %d,buffer-->%s\n",fd,connection[fd].rbuffer);
             #if ENABLEKV
             int handled=kv_request(connection[fd].rbuffer,connection[fd].wbuffer,connection[fd].rlength,&connection[fd].wlength);
+            INFO("handled:%d\n",handled);
+            INFO("wlength:%d\n",connection[fd].wlength);
             if(handled==-2){
                 cancel_event(fd);
                 memset(&connection[fd],0,sizeof(struct conn));
@@ -286,22 +289,19 @@ int recv_cb(int fd,void *arg){//流控，应用层反压，分包
             set_event(fd,EPOLLOUT);
         }else if(handled>0){
             ret-=handled;
-            if(ret==0){
-                set_event(fd,EPOLLOUT);
-            }
-            else if(ret>0){
+            if(ret>0){
                 memcpy(connection[fd].rbuffer,buf+handled,ret);
-                set_event(fd,EPOLLOUT);
+                connection[fd].rlength=ret;
             }
             set_event(fd,EPOLLOUT);
         }
-        // if(connection[fd].wlength>0){
-        //     // set_event(fd,EPOLLIN|EPOLLOUT);
-        //     set_event(fd,EPOLLOUT);
-        // }else{
-        //     set_event(fd,EPOLLIN);
-        // }
-        // return 0;
+        if(connection[fd].wlength>0){
+            // set_event(fd,EPOLLIN|EPOLLOUT);
+            set_event(fd,EPOLLOUT);
+        }else{
+            set_event(fd,EPOLLIN);
+        }
+        return 0;
     }
 }
 int send_cb(int fd,void *arg){
@@ -391,12 +391,14 @@ int recv_from_slave_cb(int fd, void *arg) {//先做简单一些，因为只是�
     INFO("recv到栈的数据长度：%d(bytes)\n",ret);
     if(ret<0){
         perror("recv");
+        slave_remove_by_fd(&mgr, fd);
         cancel_event(fd);
         memset(&connection[fd],0,sizeof(struct conn));
         close(fd);
         return -1;
     }else if(ret == 0){
         INFO("fd: %d is diconnected\n",fd);
+        slave_remove_by_fd(&mgr, fd);
         cancel_event(fd);
         memset(&connection[fd],0,sizeof(struct conn));
         close(fd);
@@ -537,20 +539,24 @@ int send_to_slave_cb(int fd,void* arg){
         INFO("在线转发\n");
         ret=master_online_sync(&mgr,slave,buf,buf_len);
     }
-    if(ret<0){//上层出错：标记离线并摘掉fd，避免fd复用后slave_find_by_fd张冠李戴
+    if(ret<0){//上层出错
         INFO("master sync error\n");
-        slave->status=4;
-        slave->fd=-1;
+        slave_remove_by_fd(&mgr, fd);
         cancel_event(fd);
         memset(&connection[fd],0,sizeof(struct conn));
         close(fd);
         return -1;
     }
-    if(ret==0){//无数据可发：在线追平回EPOLLIN等kv写路径唤醒；其余状态兜底EPOLLOUT
+    if(ret==0){//无数据可发：统一回EPOLLIN挂起，等kv写路径唤醒（master_notify_slaves）或从节点消息
         if(slave->status==3){
             set_event(fd,EPOLLIN);
+        }else if(slave->status==4){//online_sync淘汰或上层出错：摘链并断开
+            slave_remove_by_fd(&mgr, fd);
+            cancel_event(fd);
+            memset(&connection[fd],0,sizeof(struct conn));
+            close(fd);
         }else{
-            set_event(fd,EPOLLOUT);
+            set_event(fd,EPOLLIN);
         }
         return 0;
     }
@@ -640,7 +646,7 @@ int reactor_entry(char*ip,unsigned int port){
             return -1;
         }
         INFO("从服务器接入端口：%d\n",SLAVE_PORT);
-        master_init(&mgr);
+        //master_init已在Main/main.c按角色调用，这里不再重复（重复会泄漏ringbuffer）
     }
     else if(s_or_c==1){//创建从服务器，创建和主服务器通信的fd
         int master_fd=connect_server();//连接主服务器
@@ -652,7 +658,7 @@ int reactor_entry(char*ip,unsigned int port){
             printf("event_register\n");
             return -1;
         }
-        slave_init(&slave);
+        //slave_init已在Main/main.c按角色调用，这里只回填master_fd
         slave.master_fd=master_fd;
     }
     gettimeofday(&begin,NULL);
@@ -693,3 +699,4 @@ int reactor_entry(char*ip,unsigned int port){
         }
     }
 }
+#endif//NETWORK_SELECT == ENABLE_REACTOR

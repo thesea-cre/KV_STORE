@@ -87,9 +87,9 @@ int main(int argc, char *argv[]) {
 #if NETWORK_SELECT == ENABLE_REACTOR
     reactor_entry(ip,port);
 #elif NETWORK_SELECT == ENABLE_PROACTOR
-    uring_start(port);
+    uring_start(ip,port);
 #elif NETWORK_SELECT == ENABLE_NTYCO
-    nytco(port);
+    nytco(ip,port);
 #endif
 
     /* 7. 收尾（网络层返回说明已退出） */

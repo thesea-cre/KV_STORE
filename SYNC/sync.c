@@ -31,13 +31,11 @@ static int ringbuffer_init(Ringbuffer *rb, size_t size) {
     rb->size = size;
     return 0;
 }
-
 static void ringbuffer_destroy(Ringbuffer *rb) {
     if (rb->buf) free(rb->buf);
     rb->buf = NULL;
     rb->start = rb->end = rb->size = 0;
 }
-
 // 写入数据到环形缓冲区，自动覆盖旧数据
 static int ringbuffer_write(Ringbuffer *rb, const uint8_t *data, uint32_t len) {
     if (len > rb->size) {
@@ -101,7 +99,15 @@ int master_init(MasterMgr *mgr) {
     }
 
     mgr->master_offset = 0;
-    mgr->slave_head = NULL;
+    mgr->slave_head = (Slaveconn*)malloc(sizeof(Slaveconn));
+    if (!mgr->slave_head) {
+        ringbuffer_destroy(mgr->buf);
+        free(mgr->buf);
+        return -1;
+    }
+    memset(mgr->slave_head, 0, sizeof(Slaveconn));
+    mgr->slave_head->fd = -1;
+    mgr->slave_head->next = NULL;
     mgr->slave_count = 0;
     return 0;
 }
@@ -180,10 +186,10 @@ int master_handle_sync(MasterMgr *mgr,int fd,uint8_t *buf,uint32_t buf_len) {
             slave_t->fd=fd;
             slave_t->aof_fd=-1;
             slave_t->slave_offset=req_offset;
-            slave_t->next=mgr->slave_head;
+            slave_t->next=mgr->slave_head->next;
             slave_t->full_send=0;
             slave_t->incremental_send=0;
-            mgr->slave_head=slave_t;
+            mgr->slave_head->next=slave_t;
             mgr->slave_count++;
             //}
             if(req_runid!=mgr->id){//凭证不通过
@@ -200,10 +206,11 @@ int master_handle_sync(MasterMgr *mgr,int fd,uint8_t *buf,uint32_t buf_len) {
             }
             return 20;
         default:
-            return OVER;
+            // 不认识的命令：按包长跳过，别让网络层永久卡住（返回0意味着一个包都没消费，会buffer overflow）
+            if (TOTAL < 20) return ERROR;     // 长度字段本身不可信，按坏包处理（网络层会断链）
+            if (buf_len < TOTAL) return WAIT; // 整包还没收齐，等
+            return TOTAL;                     // 消费掉整个不认识的包
     }
-    return OVER;
-    
 }
 
 
@@ -333,13 +340,7 @@ uint64_t master_online_sync(MasterMgr *mgr, Slaveconn* slave, uint8_t *buf, uint
     if (slave->slave_offset >= mgr->master_offset) return OVER;  // 已追平，无数据可发
     if (slave->slave_offset < mgr->buf->start) {
         INFO("掉线移除\n");
-        Slaveconn* p=mgr->slave_head;
-        while(p->next!=slave){
-            p=p->next;
-        }
-        p->next=slave->next;
-        slave->next=NULL;
-        free(slave);
+        slave->status = 4;   // 落后过多，无补发价值；节点由网络层 send_to_slave_cb 返回后摘除
         return OVER;
     }
     int n = ringbuffer_read(mgr->buf, slave->slave_offset, buf, buf_len);
@@ -377,6 +378,20 @@ uint64_t master_online_sync(MasterMgr *mgr, Slaveconn* slave, uint8_t *buf, uint
 //     }
 //     return NULL;
 // }
+// 按fd摘除并释放从节点连接（虚拟头节点使头删/中删统一）
+void slave_remove_by_fd(MasterMgr *mgr, int fd) {
+    Slaveconn *p = mgr->slave_head;
+    while (p && p->next) {
+        if (p->next->fd == fd) {
+            Slaveconn *tmp = p->next;
+            p->next = tmp->next;
+            free(tmp);
+            mgr->slave_count--;
+            return;
+        }
+        p = p->next;
+    }
+}
 Slaveconn* slave_find_by_fd(MasterMgr *mgr, int fd) {
     Slaveconn *cur = mgr->slave_head;
     while (cur) {
@@ -457,7 +472,7 @@ int slave_send_sync(Slave *slave,char *buf,int buf_len) {
  * @return 处理的字节数
  */
 uint64_t slave_process(Slave *slave, uint8_t *buf, uint32_t buf_len) {
-    if (!slave || !buf || buf_len==0) return ERROR;
+    if (!slave || !buf || buf_len<0) return ERROR;
     if(slave->status==1){//正处于全量同步状态
         if(slave->file_offset>=slave->full_end){
             slave->status=0;
@@ -492,7 +507,7 @@ uint64_t slave_process(Slave *slave, uint8_t *buf, uint32_t buf_len) {
                 return 4;
             }
         }
-        
+
         int ret=kv_incremental(buf,buf_len);
         if(ret>0){
             slave->slave_offset+=ret;

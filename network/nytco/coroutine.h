@@ -54,6 +54,7 @@ typedef struct coroutine {
     char stack[STACK_SIZE];     // 独立栈内存
     struct rb_node rb_node;     // 红黑树节点：用于IO等待队列
     struct list_head ready_node;// 链表节点：用于就绪队列
+    struct list_head sleep_node;// 链表节点：用于SLEEP等待队列（等别的协程唤醒）
 } coroutine;
 
 // ========== 调度器结构体 ==========
@@ -65,12 +66,14 @@ struct schedule {
     #endif
     coroutine* current;             // 当前正在运行的协程
     int co_total;   // 总协程数
-    int co_waiting; 
+    int co_waiting; // 等IO的协程数（WAIT态，挂在rb_wait）
+    int co_sleeping;// 等条件的协程数（SLEEP态，挂在sleep_queue，由co_cond_signal按fd唤醒）
     coroutine* co_list[CO_LIST];    // 按fd索引的协程数组
     int epfd;                       // epoll实例的文件描述符
     struct epoll_event events[EPOLL_EVENT]; // epoll事件接收数组
     struct rb_root rb_wait;         // IO等待协程的红黑树根节点
     struct list_head ready_queue;   // 就绪协程的链表头
+    struct list_head sleep_queue;   // SLEEP等待协程的链表头：等条件，由co_cond_signal按fd唤醒
 };
 
 // ==================== 对外接口函数声明 ====================
@@ -103,4 +106,8 @@ static inline int setnonblock(int fd){
 int co_accept(int fd, struct sockaddr* addr, socklen_t* addrlen);
 ssize_t co_recv(int fd, void *buffer, size_t len, int flag);
 ssize_t co_send(int fd,const void *buffer,size_t len,int flag);
+// 当前协程进入SLEEP挂起，直到别的协程co_cond_signal(fd)唤醒；数据由调用方自己保证已就绪
+void co_cond_sleep(void);
+// 按fd唤醒处于SLEEP的协程（挪回就绪队列）；目标不在SLEEP态（运行中/等IO/已就绪）则返回-1，调用方忽略
+int co_cond_signal(int fd);
 #endif // COROUTINE_H

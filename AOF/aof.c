@@ -103,6 +103,7 @@ int aof_recover(void){
             printf("valid_offset:%d\n",valid_offset);
             result res;
             memset(&res,0,sizeof(struct result));//buf里面不知道有几个包
+            res.tlv_num = req.key_num;
             kv_cmd_execute(&req,&res,cmd);
             // ret=kv_protocol(buf+valid_offset,10+payload_len,&res);//要一个包一个包地弄
             // printf("kv_protocol return %d\n",ret);

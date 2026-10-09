@@ -8,14 +8,73 @@
 #include<unistd.h>
 #include<sys/time.h>
 #include"server.h"
+#include"sync.h"
+#define INFO printf
+#if NETWORK_SELECT == ENABLE_PROACTOR//整个文件只在选中io_uring时编译，避免与reactor.c的同名函数撞链接
+static void hex_dump(const void *data, size_t size, const char *title) {
+    const uint8_t *buf = (const uint8_t *)data;
+    size_t i, j;
+
+    // 打印标题和总长度
+    if (title != NULL) {
+        printf("--- %s (总长度: %zu 字节) ---\n", title, size);
+    }
+
+    // 每行16字节
+    for (i = 0; i < size; i += 16) {
+        // 1. 打印偏移地址（4位十六进制）
+        printf("%04zx: ", i);
+
+        // 2. 打印十六进制部分
+        for (j = 0; j < 16; j++) {
+            if (i + j < size) {
+                printf("%02X ", buf[i + j]);
+            } else {
+                printf("   "); // 最后一行不足16字节，补空格对齐
+            }
+            // 第8字节后加一个空格分隔，更易读
+            if (j == 7) {
+                printf(" ");
+            }
+        }
+
+        printf(" |");
+
+        // 3. 打印ASCII字符部分
+        for (j = 0; j < 16; j++) {
+            if (i + j >= size) break;
+            uint8_t c = buf[i + j];
+            // 只打印可打印ASCII字符，其他用点代替
+            if (c >= 0x20 && c <= 0x7E) {
+                printf("%c", c);
+            } else {
+                printf(".");
+            }
+        }
+
+        printf("|\n");
+    }
+}
+
 #define EVENT_RECV 0
 #define EVENT_SEND 1
 #define EVENT_ACCEPT 2
+#define EVENT_SLAVE_ACCEPT 3
+#define EVENT_SERVER_RECV 4
+#define EVENT_SERVER_SEND 5
+#define EVENT_SLAVE_RECV 6
+#define EVENT_SLAVE_SEND 7
+
 #define ENTRIES_LENGTH 1024
+#define SLAVE_PORT 8000
 // int uring_recv_cb(int fd,void *arg);
 // int uring_send_cb(int fd,void *arg);
 // int uring_accept_cb(int fd,void *arg);
 static struct timeval begin;
+struct io_uring ring;
+extern int s_or_c;
+extern MasterMgr mgr;
+extern Slave slave;
 struct conn_info{//这个结构体只是为了io完成操作后标识fd和io类型的
     int fd;
     int event;
@@ -28,13 +87,14 @@ struct conn{
     char buf[BUFFER_SIZE];
     int wlength;
     int rlength;
+    int send_pending;//1=该fd有一个send SQE还在内核执行，此时不能往buf塞新数据，也不能重复arm send
 };
 static struct conn connection[1024]={0};
-int uring_init_server(unsigned int port){
+int uring_init_server(char *ip,unsigned int port){
     int socketfd=socket(AF_INET,SOCK_STREAM,0);
     struct sockaddr_in addr;
     addr.sin_family=AF_INET;
-    addr.sin_addr.s_addr=htonl(INADDR_ANY);
+    addr.sin_addr.s_addr=inet_addr(ip);
     addr.sin_port=htons(port);
     if(-1==bind(socketfd,(struct sockaddr*)&addr,sizeof(struct sockaddr))){
         perror("bind");
@@ -46,82 +106,417 @@ int uring_init_server(unsigned int port){
     }
     return socketfd;
 }
-int set_event_send(struct io_uring*ring,int fd,void*buf,size_t len,int flag){
+//提交send队列项
+int set_event_send(struct io_uring*ring,int fd,void*buf,size_t len,int flag,int select){
      struct io_uring_sqe* sqe=io_uring_get_sqe(ring);//从ring中拿一个sqe，
+     if (!sqe) {
+        fprintf(stderr, "ERROR: io_uring_get_sqe returned NULL in set_event_send!\n");
+        return -1; // 阻止后面的崩溃
+    }
      struct conn_info conn={
         .fd=fd,
-        .event=EVENT_SEND,
+        .event=select,//一种身份
     };
     io_uring_prep_send(sqe,fd,buf,len,flag);
     memcpy(&sqe->user_data,&conn,sizeof(conn));
 }
-int set_event_recv(struct io_uring*ring,int fd,void*buf,size_t len,int flag){
+//提交recv队列项
+int set_event_recv(struct io_uring*ring,int fd,void*buf,size_t len,int flag,int select){
     struct io_uring_sqe* sqe=io_uring_get_sqe(ring);
-     struct conn_info conn={
+    if (!sqe) {
+    fprintf(stderr, "ERROR: io_uring_get_sqe returned NULL in set_event_recv!\n");
+    }
+    struct conn_info conn={//ring只是维护这个请求队列，是什么样的请求要自己写个结构体去标
         .fd=fd,
-        .event=EVENT_RECV,
+        .event=select,
     };
     io_uring_prep_recv(sqe,fd,buf,len,flag);
     memcpy(&sqe->user_data,&conn,sizeof(conn));
 }
-int set_event_accept(struct io_uring*ring,int fd,struct sockaddr* addr,socklen_t *addrlen,int flag){
+//提交accept队列项
+int set_event_accept(struct io_uring*ring,int fd,struct sockaddr* addr,socklen_t *addrlen,int flag,int select){
     struct io_uring_sqe* sqe=io_uring_get_sqe(ring);
+    if (!sqe) {
+        fprintf(stderr, "ERROR: io_uring_get_sqe returned NULL in set_event_accept!\n");
+        return -1; // 阻止后面的崩溃
+    }
     INFO("io_uing_get_sqe\n");
     struct conn_info conn={//ring只是维护这个请求队列，是什么样的请求要自己写个结构体去标
         .fd=fd,
-        .event=EVENT_ACCEPT,
+        .event=select,
     };
     io_uring_prep_accept(sqe,fd,(struct sockaddr*)addr,addrlen,flag);//
     INFO("io_uring_prep_accept\n");
     memcpy(&sqe->user_data,&conn,sizeof(conn));//sqe有个void*的user_data来存
     INFO("memcpy\n");
 }
-// typedef struct io_uring_arg_client{
-//     struct io_uring *ring;
-//     int fd;
-//     void *buf;
-//     size_t len;
-//     int flag;
-// }client_arg;
-// typedef struct io_uring_arg_accept{
-//     struct io_uring*ring;
-//     int fd;
-//     struct sockaddr* addr;
-//     socklen_t *addrlen;
-//     int flag;
-// }accept_arg;
-// int uring_recv_cb(int fd,void *arg){
-//     client_arg* Arg=(client_arg*)arg;
-//     memset(Arg->buf,0,BUFFER_SIZE);
-//     int ret=set_event_recv(Arg->ring,Arg->fd,Arg->buf,Arg->len,Arg->flag);
-//     connection[fd].rlength=ret;
-// }
-// int uring_send_cb(int fd,void *arg){
-//     client_arg* Arg=(client_arg*)arg;
-//     set_event_send(Arg->ring,Arg->fd,Arg->buf,Arg->len,Arg->flag);
-// }
-// int uring_accept_cb(int fd,void *arg){
-//     accept_arg* Arg=(accept_arg*)arg;
-//     set_event_accept(Arg->ring,Arg->fd,Arg->addr,Arg->addrlen,Arg->flag);
-// }
-int uring_start(unsigned int port){
+//用于唤醒函数
+int set_event_nop(struct io_uring* ring,int fd,int select){//只用于唤醒：nop立即完成，触发对应send回调去读真实数据
+    struct io_uring_sqe* sqe=io_uring_get_sqe(ring);
+    if (!sqe) {
+        fprintf(stderr, "ERROR: io_uring_get_sqe returned NULL in set_event_accept!\n");
+        return -1; // 阻止后面的崩溃
+    }
+    struct conn_info conn={
+        .fd=fd,
+        .event=select,
+    };
+    io_uring_prep_nop(sqe);
+    memcpy(&sqe->user_data,&conn,sizeof(conn));
+}
+int recv_cb(struct io_uring_cqe *entries,int fd){
+    int ret=entries->res;//接受到的数据
+    if(ret>0){
+        #if ENABLEKV
+        memcpy(connection[fd].rbuffer+connection[fd].rlength,connection[fd].buf,ret);
+        connection[fd].rlength+=ret;
+        int handled=kv_request(connection[fd].rbuffer,connection[fd].wbuffer,connection[fd].rlength,&connection[fd].wlength);
+        if(handled==-2){
+            memset(&connection[fd],0,sizeof(struct conn));
+            close(fd);
+            return -1;
+        }else if(handled==-1){
+            set_event_recv(&ring,fd,connection[fd].buf,BUFFER_SIZE,0,EVENT_RECV);
+        }else if(handled==0){
+            connection[fd].rlength=0;
+            set_event_send(&ring,fd,connection[fd].wbuffer,connection[fd].wlength,0,EVENT_SEND);
+        }else if(handled>0){
+            connection[fd].rlength-=handled;
+            if(connection[fd].rlength>0){
+                memmove(connection[fd].rbuffer,connection[fd].rbuffer+handled,connection[fd].rlength);
+            }
+            if(connection[fd].wlength>0){
+                set_event_send(&ring,fd,connection[fd].wbuffer,connection[fd].wlength,0,EVENT_SEND);
+            }else{
+                set_event_recv(&ring,fd,connection[fd].buf,BUFFER_SIZE,0,EVENT_RECV);
+            }   
+        }
+        #endif
+    }else if(ret<=0){
+        close(fd);
+    }
+}
+int send_cb(struct io_uring_cqe*entries,int fd){
+    int ret=entries->res;
+    connection[fd].wlength-=ret;
+    if(connection[fd].wlength>0){//部分发送：已发的部分丢弃，剩余前移，下次从这继续发
+        memmove(connection[fd].wbuffer,
+        connection[fd].wbuffer + ret,
+        connection[fd].wlength);
+    }
+    int handled=0;
+    if(connection[fd].rlength>0){
+        handled=kv_request(connection[fd].rbuffer,connection[fd].wbuffer,connection[fd].rlength,&connection[fd].wlength);
+    }
+    if(handled==-2){
+        close(fd);
+        return -1;
+    }else if(handled==-1){
+        set_event_recv(&ring,fd,connection[fd].buf,BUFFER_SIZE,0,EVENT_RECV);
+    }else if(handled==0){
+        connection[fd].rlength=0;
+        set_event_recv(&ring,fd,connection[fd].buf,BUFFER_SIZE,0,EVENT_RECV);
+    }else if(handled>0){
+        connection[fd].rlength-=handled;
+        if(connection[fd].rlength>0){
+            memmove(connection[fd].rbuffer,connection[fd].rbuffer+handled,connection[fd].rlength);
+        }
+        if(connection[fd].wlength>0){
+            set_event_send(&ring,fd,connection[fd].wbuffer,connection[fd].wlength,0,EVENT_SEND);
+        }else{
+            set_event_recv(&ring,fd,connection[fd].buf,BUFFER_SIZE,0,EVENT_RECV);
+        }
+    }
+    return 0;
+}
+int accept_cb(struct io_uring_cqe*entries,int fd){
+    struct sockaddr_in addr;
+    memset(&addr,0,sizeof(struct sockaddr_in));
+    socklen_t len=sizeof(struct sockaddr_in);
+    set_event_accept(&ring,fd,(struct sockaddr*)&addr,&len,0,EVENT_ACCEPT);
+    int connfd=entries->res;
+    //  if(connfd%10000==0){
+    //     struct timeval current;
+    //     gettimeofday(&current,NULL);
+    //     int time=TIME_SUB_MS(current,begin);
+    //     printf("Hello server:  clientfd-->%d,timeused:%d\n",connfd,time);
+    //     memcpy(&begin,&current,sizeof(struct timeval));
+    // }
+    set_event_recv(&ring,connfd,connection[connfd].buf,BUFFER_SIZE,0,EVENT_RECV);
+}
+int accept_slave_cb(struct io_uring_cqe*entries,int fd){
+    struct sockaddr_in addr;
+    memset(&addr,0,sizeof(struct sockaddr_in));
+    socklen_t len=sizeof(struct sockaddr_in);
+    set_event_accept(&ring,fd,(struct sockaddr*)&addr,&len,0,EVENT_SLAVE_ACCEPT);
+    int connfd=entries->res;
+    set_event_recv(&ring,connfd,connection[connfd].buf,BUFFER_SIZE,0,EVENT_SERVER_RECV);
+}
+int recv_from_slave_cb(struct io_uring_cqe*entries,int fd) {//先做简单一些，因为只是发psync请求
+    int ret=entries->res;
+    if(ret<0){
+        perror("recv");
+        slave_remove_by_fd(&mgr, fd);
+        memset(&connection[fd],0,sizeof(struct conn));
+        close(fd);
+        return -1;
+    }else if(ret == 0){
+        INFO("fd: %d is diconnected\n",fd);
+        slave_remove_by_fd(&mgr, fd);
+        memset(&connection[fd],0,sizeof(struct conn));
+        close(fd);
+        return 0;
+    }else{
+        hex_dump(connection[fd].buf,ret,"主服务器收\n");
+        if(connection[fd].rlength+ret>BUFFER_SIZE){
+            INFO("recv_from_slave_cb: 持久缓冲区溢出，关闭fd %d\n",fd);
+            memset(&connection[fd],0,sizeof(struct conn));
+            close(fd);
+            return -1;
+        }
+        memcpy(connection[fd].rbuffer+connection[fd].rlength,connection[fd].buf,ret);
+        connection[fd].rlength+=ret;
+        int handled=master_handle_sync(&mgr,fd,connection[fd].rbuffer,connection[fd].rlength);
+        if(handled==-2){
+            Slaveconn *slave=slave_find_by_fd(&mgr,fd);
+            slave_remove_by_fd(&mgr, fd);
+            close(fd);
+            return 0;
+        }else if(handled==-1){
+            set_event_recv(&ring,fd,connection[fd].buf,BUFFER_SIZE,0,EVENT_SERVER_RECV);
+            return 0;
+        }
+        connection[fd].rlength-=handled;
+        if(connection[fd].rlength>0){
+            memmove(connection[fd].rbuffer,connection[fd].rbuffer+handled,connection[fd].rlength);
+        }
+        Slaveconn *sconn=slave_find_by_fd(&mgr,fd);
+        if(sconn&&sconn->status!=0){
+            // set_event_send(&ring,fd,connection[fd].wbuffer,connection[fd].wlength,0,EVENT_SERVER_SEND);
+            set_event_nop(&ring,fd,EVENT_SERVER_SEND);
+
+        }else{
+            set_event_recv(&ring,fd,connection[fd].buf,BUFFER_SIZE,0,EVENT_SERVER_RECV);
+        }
+        return 0;
+    }
+    return 0;
+}
+
+int connect_server(void){
+    int socketfd=socket(AF_INET,SOCK_STREAM,0);
+    if(socketfd<0){
+        perror("sockte");
+        return -1;
+    }
+    struct sockaddr_in addr;
+    memset(&addr,0,sizeof(addr));
+    addr.sin_family=AF_INET;
+    addr.sin_port=htons(SLAVE_PORT);
+    addr.sin_addr.s_addr=inet_addr("192.168.72.129");
+    if(connect(socketfd,(struct sockaddr*)&addr,sizeof(struct sockaddr_in))<0){
+        perror("connect");
+        return -1;
+    }
+    return socketfd;
+}
+int recv_server_cb(struct io_uring_cqe*entries,int fd){
+    int ret=entries->res;
+    char *buf=connection[fd].buf;
+    hex_dump(buf,ret,"从服务器收\n");
+    if(ret<0){
+        perror("recv");
+        memset(&connection[fd],0,sizeof(struct conn));
+        close(fd);
+        return -1;
+    }else if(ret == 0){
+        INFO("fd: %d is diconnected\n",fd);
+        memset(&connection[fd],0,sizeof(struct conn));
+        close(fd);
+        return 0;
+    }else{
+        //情景1，持久缓冲区有剩余数据
+        if(connection[fd].rlength>0){
+            INFO("持久缓冲区有数据\n");
+            if(connection[fd].rlength+ret>BUFFER_SIZE){
+                memset(&connection[fd],0,sizeof(struct conn));
+                close(fd);
+                return -1;
+            }
+            memcpy(connection[fd].rbuffer+connection[fd].rlength,buf,ret);
+            int processed=0;
+            while(processed<connection[fd].rlength){
+                INFO("进入slave_process函数处理数据\n");
+                int offset=slave_process(&slave,connection[fd].rbuffer+processed,
+                    connection[fd].rlength-processed);
+                    INFO("slave_process这次处理了的字节数：%d(bytes)\n",offset);
+
+                INFO("processed已经处理了的字节数:%d(bytes)\n",processed);
+                if(offset==-1||offset==0){//0=本段没处理完；-1=WAIT等数据；-2=ERROR，都停下等下一段
+                    // set_event_recv(&ring,fd,connection[fd].buf,BUFFER_SIZE,0,EVENT_SLAVE_RECV);
+                    break;
+                }else if(offset==-2){
+                    close (fd);
+                    return 0;
+                }
+                processed+=offset;
+            }
+            connection[fd].rlength-=processed;
+            INFO("这次recv到持久缓冲区处理的总字节数：%d(bytes)\n",processed);
+            INFO("持久化缓冲区剩余的字节数：%d(bytes)\n",connection[fd].rlength);
+            if(connection[fd].rlength>0){//缓冲区前移
+                memmove(connection[fd].rbuffer,connection[fd].rbuffer+processed,
+                    connection[fd].rlength);
+            }
+            set_event_recv(&ring,fd,connection[fd].buf,BUFFER_SIZE,0,EVENT_SLAVE_RECV);
+            return 0;
+        }
+        //情景2：持久缓冲区没有剩余数据，直接在栈上处理数据
+        int buf_offset=0;
+        while(buf_offset<ret){
+            int offset=slave_process(&slave,buf+buf_offset,ret-buf_offset);
+            if(offset<=0){//0=本段没处理完；-1=WAIT等数据；-2=ERROR，都停下等下一段
+                set_event_recv(&ring,fd,connection[fd].buf,BUFFER_SIZE,0,EVENT_SLAVE_RECV);
+                break;
+            }
+            buf_offset+=offset;
+        }
+        INFO("这次recv直接在栈上处理的总字节数：%d(bytes)\n",buf_offset);
+        INFO("栈内剩余的字节数：%d(bytes)\n",ret-buf_offset);
+        if(buf_offset<ret){
+            memcpy(connection[fd].rbuffer+connection[fd].rlength,buf+buf_offset,ret-buf_offset);
+            connection[fd].rlength+=ret-buf_offset;
+        }
+        set_event_recv(&ring,fd,connection[fd].buf,BUFFER_SIZE,0,EVENT_SLAVE_RECV);
+        return 0;
+    }
+}
+//写路径传播钩子：给发送态(2/3)的从节点fd提交一个nop SQE，立即完成并触发send_to_slave_cb去读真实数据
+void master_notify_slaves(MasterMgr *mgr) {
+    if (!mgr) return;
+    Slaveconn *cur = mgr->slave_head ? mgr->slave_head->next : NULL;//虚拟头节点之后才是真实节点
+    while (cur) {
+        if ((cur->status == 2 || cur->status == 3) && cur->fd >= 0
+            && connection[cur->fd].send_pending == 0) {//有send在途的fd不能塞nop，否则send_to_slave_cb会覆写还在被内核引用的buf
+            set_event_nop(&ring, cur->fd, EVENT_SERVER_SEND);
+        }
+        cur = cur->next;
+    }
+}
+//全量重传字节流,增量重传TLV，
+int send_to_slave_cb(struct io_uring_cqe*entries,int fd){
+    int set=entries->res;
+    if(set<0){
+        perror("send");
+        slave_remove_by_fd(&mgr,fd);
+        memset(&connection[fd],0,sizeof(struct conn));
+        close(fd);
+        return -1;
+    }
+    connection[fd].wlength-=set;
+    connection[fd].send_pending=0;//上一个send SQE已完成，buf可以复用了
+    char *buf=connection[fd].buf;
+    int buf_len=BUFFER_SIZE;
+    Slaveconn *slave=slave_find_by_fd(&mgr,fd);
+    if(!slave){
+        set_event_recv(&ring,fd,connection[fd].buf,BUFFER_SIZE,0,EVENT_SERVER_RECV);
+        return 0;
+    }
+    int ret=0;
+    if(slave->status==1){
+        INFO("走全量重传\n");
+        ret=master_full_sync(&mgr,slave,"aof_db",buf,buf_len);
+    }else if(slave->status==2){
+        INFO("走增量重传\n");
+        ret=master_incremental_sync(&mgr,slave,buf,buf_len);
+    }else if(slave->status==3){
+        INFO("在线转发\n");
+        ret=master_online_sync(&mgr,slave,buf,buf_len);
+    }
+    if(ret<0){//上层出错
+        INFO("master sync error\n");
+        slave_remove_by_fd(&mgr, fd);
+        memset(&connection[fd],0,sizeof(struct conn));
+        close(fd);
+        return -1;
+    }
+    if(ret==0){
+        if(slave->status==3){
+            set_event_recv(&ring,fd,connection[fd].buf,BUFFER_SIZE,0,EVENT_SERVER_RECV);
+        }else if(slave->status==4){//online_sync淘汰或上层出错：摘链并断开
+            slave_remove_by_fd(&mgr, fd);
+            memset(&connection[fd],0,sizeof(struct conn));
+            close(fd);
+        }else{
+            //兜底：状态机出现意外值，挂起等唤醒，不能什么都不武装（one-shot下不arm就是死连接）
+            set_event_recv(&ring,fd,connection[fd].buf,BUFFER_SIZE,0,EVENT_SERVER_RECV);
+        }
+        return 0;
+    }
+    connection[fd].send_pending=1;//arm send后buf被内核引用，完成前不能覆写、不能重复arm
+    set_event_send(&ring,fd,buf,ret,0,EVENT_SERVER_SEND);
+    hex_dump(buf,ret,"主服务器发\n");
+}
+//包含发送心跳包，发送同步请求,目前还没有发送心跳包
+int send_server_cb(struct io_uring_cqe*entries,int fd){
+    int set=entries->res;//上一轮的
+    if(set<0){
+        perror("send");
+        close(fd);
+        return -1;
+    }
+    connection[fd].wlength-=set;
+    //PSYNC已发出：从节点此后只收（心跳未实现，没有要主动发的），arm recv挂起
+    set_event_recv(&ring,fd,connection[fd].buf,BUFFER_SIZE,0,EVENT_SLAVE_RECV);
+    return 0;
+}
+int uring_start(char *ip,unsigned int port){
     struct io_uring_params params;//设置ring的参数结构体
     memset(&params,0,sizeof(struct io_uring_params));
-    struct io_uring ring;
     int ret= io_uring_queue_init_params(ENTRIES_LENGTH,&ring,&params);//params是这个函数的配置入参，内核把输出信息写回这个结构体
+    if (ret < 0) {
+        errno = -ret; // liburing 返回负数，需转为 errno
+        perror("io_uring_queue_init_params failed");
+        return -1;
+    }
+    printf("io_uring init success. Kernel sq_entries: %u, cq_entries: %u\n", 
+       ring.sq.kring_entries, ring.cq.kring_entries);
     struct sockaddr_in addr;
     socklen_t addrlen=sizeof(addr);
     int i=0;
     while(i<MAX_PORT){
-        int socketfd=uring_init_server(port+i);//创建一个套接字fd
-        printf("port %d is used\n",port+i);
-        set_event_accept(&ring,socketfd,(struct sockaddr*)&addr,&addrlen,0);
+        int socketfd=uring_init_server(ip,port+i);//创建一个套接字fd
+        if(socketfd<0){
+            INFO("uring_init_server failed\n");
+            return -1;
+        }
+        INFO("port %d is used\n",port+i);
+        set_event_accept(&ring,socketfd,(struct sockaddr*)&addr,&addrlen,0,EVENT_ACCEPT);
         i++;
     }
-    printf("network:proactor\n");
+    if(s_or_c==0){//创建主服务器
+        int listenfd=uring_init_server(ip,SLAVE_PORT);
+        if(listenfd<0){
+             INFO("uring_init_server failed\n");
+            return -1;
+        }
+        set_event_accept(&ring,listenfd,(struct sockaddr*)&addr,&addrlen,0,EVENT_SLAVE_ACCEPT);
+        INFO("从服务器接入端口：%d\n",SLAVE_PORT);
+    }
+    else if(s_or_c==1){//创建从服务器，创建和主服务器通信的fd
+        int master_fd=connect_server();//连接主服务器
+        if(master_fd<0){
+            INFO("connect master failed\n");
+            return -1;
+        }
+        slave.master_fd=master_fd;
+        //io_uring是one-shot：connect后必须主动提交第一个SQE，发送完成会触发send_server_cb
+        int n=slave_send_sync(&slave,connection[master_fd].buf,BUFFER_SIZE);
+        if(n>0){
+            set_event_send(&ring,master_fd,connection[master_fd].buf,n,0,EVENT_SLAVE_SEND);
+        }
+    }
     gettimeofday(&begin,NULL);
-    // char res_buf[BUFFER_SIZE]={0};
-    // char buf[BUFFER_SIZE]={0};
     while(1){
         io_uring_submit(&ring);//提交给内核，内核将这些请求放入一个队列等待执行
         struct io_uring_cqe* cqe;
@@ -133,79 +528,25 @@ int uring_start(unsigned int port){
             struct conn_info result;
             memcpy(&result,&entries->user_data,sizeof(result));
             if(result.event==EVENT_RECV){
-                int ret=entries->res;//理想状态下是对的，字节数
-                if(ret>0){
-                    INFO("set_event_recv ret: %d, %s\n", ret, connection[result.fd].rbuffer);
-                    #if ENABLEKV
-                    memcpy(connection[result.fd].rbuffer+connection[result.fd].rlength,connection[result.fd].buf,ret);
-                    connection[result.fd].rlength+=ret;
-                    if(kv_request(connection[result.fd].rbuffer,
-                        connection[result.fd].wbuffer,&connection[result.fd].rlength,
-                        &connection[result.fd].wlength)<0){
-                        memset(&connection[result.fd],0,sizeof(struct conn));
-                    }
-                    #endif
-                    //  client_arg arg={
-                    // .ring=&ring,.fd=result.fd,.buf=connection[result.fd].wbuffer,.len=connection[result.fd].wlength,.flag=0
-                    // };
-                    // connection[result.fd].send_callback(result.fd,(void*)&arg);
-                    if(connection[result.fd].wlength>0){
-                        set_event_send(&ring,result.fd,connection[result.fd].wbuffer,connection[result.fd].wlength,0);//要同时监听可读事件和可写事件，不然如果数据没来完，就会卡死
-                        set_event_recv(&ring,result.fd,connection[result.fd].buf,BUFFER_SIZE,0);
-                    }else{
-                        set_event_recv(&ring,result.fd,connection[result.fd].buf,BUFFER_SIZE,0);
-                    }
-                }else if(ret==0){
-                    close(result.fd);
-                }
+                recv_cb(entries,result.fd);
             }else if(result.event==EVENT_ACCEPT){
-                // accept_arg arg_accept={
-                //      .ring=&ring,.fd=result.fd,.addr=(struct sockaddr*)&addr,.addrlen=&addrlen,.flag=0
-                // };
-                // connection[result.fd].r_action.accept_callback(result.fd,(void*)&arg_accept);
-                struct sockaddr_in addr;
-                memset(&addr,0,sizeof(struct sockaddr_in));
-                socklen_t len=sizeof(struct sockaddr_in);
-                set_event_accept(&ring,result.fd,(struct sockaddr*)&addr,&len,0);
-                int connfd=entries->res;
-                 if(connfd%10000==0){
-                    struct timeval current;
-                    gettimeofday(&current,NULL);
-                    int time=TIME_SUB_MS(current,begin);
-                    printf("Hello server:  clientfd-->%d,timeused:%d\n",connfd,time);
-                    memcpy(&begin,&current,sizeof(struct timeval));
-                }
-            //     client_arg arg_recv={
-            //     .ring=&ring,.fd=connfd,.buf=connection[connfd].rbuffer,.len=BUFFER_SIZE,.flag=0
-            //    };
-            //    connection[connfd].r_action.recv_callback(connfd,(void*)&arg_recv);
-            set_event_recv(&ring,connfd,connection[connfd].buf,BUFFER_SIZE,0);
+                accept_cb(entries,result.fd);
             }else if(result.event==EVENT_SEND){
-                int ret=entries->res;
-            //    client_arg arg={
-            //     .ring=&ring,.fd=result.fd,.buf=connection[result.fd].rbuffer,.len=BUFFER_SIZE,.flag=0
-            //    };
-            //    connection[result.fd].r_action.recv_callback(result.fd,(void*)&arg);
-            // }
-                connection[result.fd].wlength-=ret;
-                if(connection[result.fd].wlength>0){
-                    memmove(connection[result.fd].wbuffer, 
-                    connection[result.fd].wbuffer + ret, 
-                    connection[result.fd].wlength);
-                }
-                if(kv_request(connection[result.fd].rbuffer,connection[result.fd].wbuffer,&connection[result.fd].rlength,&connection[result.fd].wlength)<0){
-                    memset(&connection[result.fd],0,sizeof(struct conn));
-                }
-                if(connection[result.fd].wlength>0){
-                        set_event_send(&ring,result.fd,connection[result.fd].wbuffer,connection[result.fd].wlength,0);//要同时监听可读事件和可写事件，不然如果数据没来完，就会卡死
-                        set_event_recv(&ring,result.fd,connection[result.fd].buf,BUFFER_SIZE,0);  
-                }else{
-                        set_event_recv(&ring,result.fd,connection[result.fd].buf,BUFFER_SIZE,0);
-                }
-                        
+                send_cb(entries,result.fd);
+            }else if(result.event==EVENT_SERVER_RECV){
+                recv_from_slave_cb(entries,result.fd);
+            }else if(result.event==EVENT_SERVER_SEND){
+                send_to_slave_cb(entries,result.fd);
+            }else if(result.event==EVENT_SLAVE_RECV){
+                recv_server_cb(entries,result.fd);
+            }else if(result.event==EVENT_SLAVE_SEND){
+                send_server_cb(entries,result.fd);
+            }else if(result.event==EVENT_SLAVE_ACCEPT){
+                accept_slave_cb(entries,result.fd);
             }
         }
         io_uring_cq_advance(&ring, nready);
     }
     return 0;
 }
+#endif//NETWORK_SELECT == ENABLE_PROACTOR

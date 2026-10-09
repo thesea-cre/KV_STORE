@@ -4,7 +4,7 @@ CFLAGS   := -Wall -Wextra -g -O0 \
             -I../include \
             -I../network/nytco \
             -D_GNU_SOURCE
-LDFLAGS  := -L../liburing/src -luring -ldl -lpthread
+LDFLAGS  := -L../lib/liburing/src -luring -ldl -lpthread
 
 # 公共目标文件目录：顶层主Makefile编译好的所有公共.o都在这里
 COMMON_OBJ_DIR := ../obj

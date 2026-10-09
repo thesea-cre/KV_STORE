@@ -8,19 +8,28 @@ Mempool* Mempool_create(size_t nsize,size_t nblock){//创建一个额外的内�
     pool->nBlock=nblock;
     pool->pbuffer=NULL;
     pool->header=NULL;
+    pool->core_list = NULL;
     pthread_mutex_init(&pool->mutex,NULL);
 
     return pool;
 }
 void Mempool_destory(Mempool* pool){//销毁内存池
     if(!pool) return;
+    pthread_mutex_lock(&pool->mutex);
+    MemBlock* core = pool->core_list;
+    while (core) {
+        MemBlock* next = core->next;
+        free(core);
+        core = next;
+    }
     if(pool->pbuffer) {
         free(pool->pbuffer);
     }
+    pthread_mutex_unlock(&pool->mutex);
     pthread_mutex_destroy(&pool->mutex);
     free(pool);
 }
-void Mempool_Init(Mempool* pool){//
+static void Mempool_Init(Mempool* pool){//仅在Mempool_Alloc内惰性调用；外部勿调，重复调用会泄漏pbuffer
     if(!pool) return;
     size_t Blocksize=pool->nSize+sizeof(MemBlock);
     size_t Poolsize=pool->nBlock*Blocksize;
@@ -31,6 +40,7 @@ void Mempool_Init(Mempool* pool){//
     pool->header->bBelong=_POOL;
     pool->header->pool=pool;
     pool->header->next=NULL;
+    
     MemBlock * p=pool->header;
     for(int i=1;i<pool->nBlock;i++){
         MemBlock* q=(MemBlock*)(pool->pbuffer+i*Blocksize);
@@ -54,8 +64,9 @@ void *Mempool_Alloc(Mempool* pool,size_t nsize){
         if(ptr){
             ptr->bUsed=_USE;
             ptr->bBelong=_CORE;
-            ptr->pool=NULL;
-            ptr->next=NULL;
+            ptr->pool=pool;
+            ptr->next = pool->core_list;
+            pool->core_list = ptr;
         }
     }else{
         ptr=pool->header;//header就是没有分配的内存池
@@ -71,51 +82,79 @@ void Mempool_free(Mempool* pool,void *ptr){
     pthread_mutex_lock(&pool->mutex);
     MemBlock* pBlock=(MemBlock*)((char*) ptr-sizeof(MemBlock));
     if(pBlock->bBelong==_CORE){
-        free(pBlock);
+        // 从core_list摘除再free：不摘除的话destroy时会对着已释放的指针再free一次
+        MemBlock **pp=&pool->core_list;
+        while(*pp && *pp!=pBlock) pp=&(*pp)->next;
+        if(*pp){//找到了才free；找不到说明这块已经释放过，忽略（防double free）
+            *pp=pBlock->next;
+            pthread_mutex_unlock(&pool->mutex);
+            free(pBlock);
+        }else{
+            pthread_mutex_unlock(&pool->mutex);
+        }
         return;
     }
     else{
+        if(pBlock->bUsed==_NOT_USE){//已经释放过，忽略，防double free
+            pthread_mutex_unlock(&pool->mutex);
+            return;
+        }
         pBlock->bUsed=_NOT_USE;
         pBlock->next=pool->header;
         pool->header=pBlock;
     }
     pthread_mutex_unlock(&pool->mutex);
 }
-static void Managerpool_Init(Mempool_Manager* ms,int begin,int end,Mempool* pool){
-    for(int i=begin;i<end;i++){
-        ms->_Alloc[i]=pool;
-    }
+
+static pthread_once_t manager_once = PTHREAD_ONCE_INIT;
+static Mempool_Manager manager;
+// static void Managerpool_Init(Mempool_Manager* ms,int begin,int end,Mempool* pool){
+//     // for(int i=begin;i<end;i++){
+//     //     ms->_Alloc[i]=pool;
+//     // }
+     
+// }
+static void init_manager(void) {
+    memset(&manager, 0, sizeof(Mempool_Manager));
+    
+    manager.Mempool_64 = *Mempool_create(64, 1000);
+    manager.Mempool_128 = *Mempool_create(128, 1000);
+    manager.Mempool_256 = *Mempool_create(256, 1000);
+    
+    for (int i = 1; i <= 64; i++) manager._Alloc[i] = &manager.Mempool_64;
+    for (int i = 65; i <= 128; i++) manager._Alloc[i] = &manager.Mempool_128;
+    for (int i = 129; i <= 256; i++) manager._Alloc[i] = &manager.Mempool_256;
 }
 Mempool_Manager* Managerpool_GetInstance(void){
-    static Mempool_Manager manager;//创建一个管理器
-    static int inited=0;
-    if(inited==0){
+    // static Mempool_Manager manager;//创建一个管理器
+    // static int inited=0;
+    // if(inited==0){
 
 
-        memset(&manager,0,sizeof(Mempool_Manager));
-        manager.Mempool_64.nSize=64;
-        manager.Mempool_64.nBlock=1000;
-        pthread_mutex_init(&manager.Mempool_64.mutex,NULL);
+    //     memset(&manager,0,sizeof(Mempool_Manager));
+    //     manager.Mempool_64.nSize=64;
+    //     manager.Mempool_64.nBlock=1000;
+    //     pthread_mutex_init(&manager.Mempool_64.mutex,NULL);
         
 
-        manager.Mempool_128.nSize=128;
-        manager.Mempool_128.nBlock=1000;
-        pthread_mutex_init(&manager.Mempool_128.mutex,NULL);
+    //     manager.Mempool_128.nSize=128;
+    //     manager.Mempool_128.nBlock=1000;
+    //     pthread_mutex_init(&manager.Mempool_128.mutex,NULL);
 
        
 
-        manager.Mempool_256.nSize=256;
-        manager.Mempool_256.nBlock=1000;        
-        pthread_mutex_init(&manager.Mempool_256.mutex,NULL);
+    //     manager.Mempool_256.nSize=256;
+    //     manager.Mempool_256.nBlock=1000;        
+    //     pthread_mutex_init(&manager.Mempool_256.mutex,NULL);
 
-        Managerpool_Init(&manager,1,65,&manager.Mempool_64);
-        Managerpool_Init(&manager,65,129,&manager.Mempool_128);
-        Managerpool_Init(&manager,129,257,&manager.Mempool_256);
+    //     Managerpool_Init(&manager,1,65,&manager.Mempool_64);
+    //     Managerpool_Init(&manager,65,129,&manager.Mempool_128);
+    //     Managerpool_Init(&manager,129,257,&manager.Mempool_256);
 
-        inited=1;
-    }
+    //     inited=1;
+    // }
+    pthread_once(&manager_once, init_manager);
     return &manager;
-
 }
 void *Managerpool_Alloc(Mempool_Manager* manager,size_t nSize){
     if(!manager) return NULL;
@@ -132,7 +171,7 @@ void *Managerpool_Alloc(Mempool_Manager* manager,size_t nSize){
     }
 }
 void Managerpool_free(Mempool_Manager* manager,void *ptr){
-    if(manager==NULL) return;
+    if(manager==NULL||ptr==NULL) return;
     MemBlock* pre=(MemBlock*)((char*)ptr-sizeof(MemBlock));
     if(pre->bBelong==_POOL){
         Mempool* pool=pre->pool;
