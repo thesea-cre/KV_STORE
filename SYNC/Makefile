@@ -5,8 +5,9 @@ CFLAGS   := -Wall -Wextra -g -O0 \
             -I../network/nytco \
             -D_GNU_SOURCE\
 			-fno-pie \
-			-mcmodel=medium
-LDFLAGS  :=-no-pie -L../liburing/src -luring -ldl -lpthread 
+			-mcmodel=medium \
+			-fsanitize=address
+LDFLAGS  :=-no-pie -L../liburing/src -luring -ldl -lpthread -fsanitize=address
 
 # 公共目标文件目录：顶层主Makefile编译好的所有公共.o都在这里
 COMMON_OBJ_DIR := ../obj

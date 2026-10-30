@@ -34,20 +34,22 @@ static void Mempool_Init(Mempool* pool){//仅在Mempool_Alloc内惰性调用；�
     size_t Blocksize=pool->nSize+sizeof(MemBlock);
     size_t Poolsize=pool->nBlock*Blocksize;
     pool->pbuffer=(char *)malloc(Poolsize);
-    if(pool->pbuffer==NULL) return;
-    pool->header=(MemBlock*)pool->pbuffer;
-    pool->header->bUsed=_NOT_USE;
-    pool->header->bBelong=_POOL;
-    pool->header->pool=pool;
-    pool->header->next=NULL;
-    
+    // if(pool->pbuffer==NULL) return;
+    // pool->header=(MemBlock*)pool->pbuffer;
+    // pool->header->bUsed=_NOT_USE;
+    // pool->header->bBelong=_POOL;
+    // pool->header->pool=pool;
+    // pool->header->next=NULL;
+    // pool->header->pre=NULL;
     MemBlock * p=pool->header;
-    for(int i=1;i<pool->nBlock;i++){
+    for(int i=0;i<pool->nBlock;i++){
         MemBlock* q=(MemBlock*)(pool->pbuffer+i*Blocksize);
         q->bUsed=_NOT_USE;
         q->bBelong=_POOL;
         q->pool=pool;
+        q->size=pool->nSize;
         p->next=q;
+        q->pre=p;
         p=q;
     }
     p->next=NULL;
@@ -59,18 +61,39 @@ void *Mempool_Alloc(Mempool* pool,size_t nsize){
         Mempool_Init(pool);
     }
     MemBlock *ptr=NULL;
-    if(pool->header==NULL){//内存池耗尽
-        ptr=(MemBlock*)malloc(nsize+sizeof(MemBlock));
+    if(pool->header->next==NULL){//内存池耗尽：优先复用core_list里回收的块，没有才malloc新的
+        ptr=pool->core_list->next;
+        while(ptr){
+            if(ptr->size>=nsize){
+                break;
+            }
+            ptr=ptr->next;
+        }
         if(ptr){
+            ptr->pre->next=ptr->next;
+            if(ptr->next){
+                ptr->next->pre=ptr->pre;
+            }
+            ptr->pre=NULL;
+            ptr->next=NULL;
+            ptr->bUsed=_USE;
+        }else{
+            ptr=(MemBlock*)malloc(nsize+sizeof(MemBlock));
             ptr->bUsed=_USE;
             ptr->bBelong=_CORE;
             ptr->pool=pool;
-            ptr->next = pool->core_list;
-            pool->core_list = ptr;
+            ptr->size=nsize;
+            ptr->next=NULL;
+            ptr->pre=NULL;
         }
     }else{
-        ptr=pool->header;//header就是没有分配的内存池
-        pool->header=pool->header->next;
+        ptr=pool->header->next;//header就是没有分配的内存池
+        pool->header->next=ptr->next;
+        if(ptr->next){
+            ptr->next->pre=pool->header;
+        }
+        ptr->next=NULL;
+        ptr->pre=NULL;
         ptr->bUsed=_USE;
     }
     pthread_mutex_unlock(&pool->mutex);
@@ -82,16 +105,21 @@ void Mempool_free(Mempool* pool,void *ptr){
     pthread_mutex_lock(&pool->mutex);
     MemBlock* pBlock=(MemBlock*)((char*) ptr-sizeof(MemBlock));
     if(pBlock->bBelong==_CORE){
-        // 从core_list摘除再free：不摘除的话destroy时会对着已释放的指针再free一次
-        MemBlock **pp=&pool->core_list;
-        while(*pp && *pp!=pBlock) pp=&(*pp)->next;
-        if(*pp){//找到了才free；找不到说明这块已经释放过，忽略（防double free）
-            *pp=pBlock->next;
+        // 不立即free：置空闲挂回core_list复用，由destory统一释放。
+        // double free时读的是活着的块，bUsed==_NOT_USE直接忽略；
+        // 若malloc后立刻free，第二次再读块头就是use-after-free（ASan可证），原理上防不住
+        if(pBlock->bUsed==_NOT_USE){//已经释放过，忽略，防double free
             pthread_mutex_unlock(&pool->mutex);
-            free(pBlock);
-        }else{
-            pthread_mutex_unlock(&pool->mutex);
+            return;
         }
+        pBlock->bUsed=_NOT_USE;
+        pBlock->pre=pool->core_list;
+        pBlock->next=pool->core_list->next;
+        if(pool->core_list->next){
+            pool->core_list->next->pre=pBlock;
+        }
+        pool->core_list->next=pBlock;
+        pthread_mutex_unlock(&pool->mutex);
         return;
     }
     else{
@@ -100,32 +128,55 @@ void Mempool_free(Mempool* pool,void *ptr){
             return;
         }
         pBlock->bUsed=_NOT_USE;
-        pBlock->next=pool->header;
-        pool->header=pBlock;
+        pBlock->pre=pool->header;
+        pBlock->next=pool->header->next;
+        if(pBlock->next){
+            pBlock->next->pre=pBlock;
+        }
+        pool->header->next=pBlock;
     }
     pthread_mutex_unlock(&pool->mutex);
 }
 
 static pthread_once_t manager_once = PTHREAD_ONCE_INIT;
 static Mempool_Manager manager;
-// static void Managerpool_Init(Mempool_Manager* ms,int begin,int end,Mempool* pool){
-//     // for(int i=begin;i<end;i++){
-//     //     ms->_Alloc[i]=pool;
-//     // }
-     
-// }
 static void init_manager(void) {
     memset(&manager, 0, sizeof(Mempool_Manager));
-    
-    manager.Mempool_64 = *Mempool_create(64, 1000);
-    manager.Mempool_128 = *Mempool_create(128, 1000);
-    manager.Mempool_256 = *Mempool_create(256, 1000);
-    
+    //直接在静态存储上初始化三个池，不走Mempool_create——它malloc的80字节结构体
+    //按值拷贝进manager后原指针即丢，三个池白泄漏240字节（LSan实测上报）
+    Mempool *pools[3] = { &manager.Mempool_64, &manager.Mempool_128, &manager.Mempool_256 };
+    size_t   sizes[3] = { 64, 128, 256 };
+    for (int i = 0; i < 3; i++) {
+        pools[i]->nSize  = sizes[i];
+        pools[i]->nBlock = 1000;
+        pthread_mutex_init(&pools[i]->mutex, NULL);
+        pools[i]->core_list=(MemBlock*)malloc(sizeof(MemBlock));
+        memset(pools[i]->core_list,0,sizeof(MemBlock));
+        pools[i]->core_list->bBelong=_CORE;
+        pools[i]->core_list->bUsed=_USE;
+        pools[i]->core_list->size=0;
+        pools[i]->core_list->pool=pools[i];
+        pools[i]->core_list->next=NULL;
+        pools[i]->core_list->pre=NULL;
+
+
+        pools[i]->header=(MemBlock*)malloc(sizeof(MemBlock));
+        memset(pools[i]->header,0,sizeof(MemBlock));
+        pools[i]->header->bBelong=_POOL;
+        pools[i]->header->bUsed=_USE;
+        pools[i]->header->size=0;
+        pools[i]->header->pool=pools[i];
+        pools[i]->header->next=NULL;
+        pools[i]->header->pre=NULL;
+
+        //pbuffer/header/core_list已被上面的memset归零，惰性初始化语义不变
+    }
     for (int i = 1; i <= 64; i++) manager._Alloc[i] = &manager.Mempool_64;
     for (int i = 65; i <= 128; i++) manager._Alloc[i] = &manager.Mempool_128;
     for (int i = 129; i <= 256; i++) manager._Alloc[i] = &manager.Mempool_256;
+
 }
-Mempool_Manager* Managerpool_GetInstance(void){
+Mempool_Manager Managerpool_GetInstance(void){
     // static Mempool_Manager manager;//创建一个管理器
     // static int inited=0;
     // if(inited==0){
@@ -154,7 +205,7 @@ Mempool_Manager* Managerpool_GetInstance(void){
     //     inited=1;
     // }
     pthread_once(&manager_once, init_manager);
-    return &manager;
+    return manager;
 }
 void *Managerpool_Alloc(Mempool_Manager* manager,size_t nSize){
     if(!manager) return NULL;
@@ -180,118 +231,3 @@ void Managerpool_free(Mempool_Manager* manager,void *ptr){
         free(pre);
     }
 }
-
-
-// int main() {
-//     printf("========== 内存池功能测试开始 ==========\n\n");
-
-//     // 1. 获取管理器单例
-//     Mempool_Manager* mgr = Managerpool_GetInstance();
-//     assert(mgr != NULL);
-//     printf("✓ 内存池管理器初始化成功\n\n");
-
-//     // ---------- 测试1：小内存分配（池内） ----------
-//     printf("----- 测试1：32字节分配（64字节池） -----\n");
-//     void* p1 = Managerpool_Alloc(mgr, 32);
-//     assert(p1 != NULL);
-//     MemBlock* blk1 = (MemBlock*)((char*)p1 - sizeof(MemBlock));
-//     assert(blk1->bBelong == _POOL && blk1->bUsed == _USE);
-//     printf("✓ 分配成功，内存来自池内\n");
-
-//     // 读写验证
-//     memset(p1, 'A', 32);
-//     int check = 1;
-//     for (int i = 0; i < 32; i++) {
-//         if (((char*)p1)[i] != 'A') { check = 0; break; }
-//     }
-//     assert(check);
-//     printf("✓ 内存读写验证通过\n\n");
-
-//     // ---------- 测试2：边界值64字节 ----------
-//     printf("----- 测试2：边界值64字节 -----\n");
-//     void* p2 = Managerpool_Alloc(mgr, 64);
-//     assert(p2 != NULL);
-//     MemBlock* blk2 = (MemBlock*)((char*)p2 - sizeof(MemBlock));
-//     assert(blk2->bBelong == _POOL);
-//     printf("✓ 64字节分配成功，命中64字节池\n\n");
-
-//     // ---------- 测试3：128字节 ----------
-//     printf("----- 测试3：128字节分配 -----\n");
-//     void* p3 = Managerpool_Alloc(mgr, 128);
-//     assert(p3 != NULL);
-//     MemBlock* blk3 = (MemBlock*)((char*)p3 - sizeof(MemBlock));
-//     assert(blk3->bBelong == _POOL);
-//     printf("✓ 128字节分配成功，命中128字节池\n\n");
-
-//     // ---------- 测试4：256字节（最大池规格） ----------
-//     printf("----- 测试4：256字节分配（最大池） -----\n");
-//     void* p4 = Managerpool_Alloc(mgr, 256);
-//     assert(p4 != NULL);
-//     MemBlock* blk4 = (MemBlock*)((char*)p4 - sizeof(MemBlock));
-//     assert(blk4->bBelong == _POOL);
-//     printf("✓ 256字节分配成功，命中256字节池\n\n");
-
-//     // ---------- 测试5：超大小分配（系统malloc降级） ----------
-//     printf("----- 测试5：512字节分配（系统分配） -----\n");
-//     void* p5 = Managerpool_Alloc(mgr, 512);
-//     assert(p5 != NULL);
-//     MemBlock* blk5 = (MemBlock*)((char*)p5 - sizeof(MemBlock));
-//     assert(blk5->bBelong == _CORE);
-//     printf("✓ 512字节分配成功，走系统malloc\n");
-
-//     memset(p5, 'B', 512);
-//     check = 1;
-//     for (int i = 0; i < 512; i++) {
-//         if (((char*)p5)[i] != 'B') { check = 0; break; }
-//     }
-//     assert(check);
-//     printf("✓ 大内存读写验证通过\n\n");
-
-//     // ---------- 测试6：释放与地址复用 ----------
-//     printf("----- 测试6：内存释放与复用 -----\n");
-//     void* old_addr = p1;
-//     Managerpool_free(mgr, p1);
-//     printf("✓ 释放32字节内存\n");
-
-//     void* p1_new = Managerpool_Alloc(mgr, 32);
-//     assert(p1_new != NULL);
-//     if (p1_new == old_addr) {
-//         printf("✓ 重新分配地址相同，内存块复用成功\n");
-//     } else {
-//         printf("⚠  地址不同（链表顺序影响，属于正常现象）\n");
-//     }
-//     Managerpool_free(mgr, p1_new);
-//     printf("\n");
-
-//     // ---------- 测试7：批量分配释放 ----------
-//     printf("----- 测试7：批量分配释放（10个100字节） -----\n");
-//     void* ptrs[10];
-//     for (int i = 0; i < 10; i++) {
-//         ptrs[i] = Managerpool_Alloc(mgr, 100);
-//         assert(ptrs[i] != NULL);
-//         *(int*)ptrs[i] = i; // 写入编号
-//     }
-//     printf("✓ 10个100字节分配完成\n");
-
-//     // 验证数据不串位
-//     check = 1;
-//     for (int i = 0; i < 10; i++) {
-//         if (*(int*)ptrs[i] != i) { check = 0; break; }
-//     }
-//     assert(check);
-//     printf("✓ 批量数据读写验证通过\n");
-
-//     for (int i = 0; i < 10; i++) {
-//         Managerpool_free(mgr, ptrs[i]);
-//     }
-//     printf("✓ 批量释放完成\n\n");
-
-//     // 释放剩余测试内存
-//     Managerpool_free(mgr, p2);
-//     Managerpool_free(mgr, p3);
-//     Managerpool_free(mgr, p4);
-//     Managerpool_free(mgr, p5);
-
-//     printf("========== 全部测试用例通过！ ==========\n");
-//     return 0;
-// }

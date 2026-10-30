@@ -4,13 +4,8 @@
 #include<time.h>
 #include<string.h>
 #include<stdarg.h>
-typedef enum{
-    LOG_DEBUG,
-    LOG_INFO,
-    LOG_WARN,
-    LOG_ERROR,
-    LOG_FATAL
-}log_level_t;
+#include"log.h"
+
 static pthread_mutex_t log_mutex;
 static log_level_t level=LOG_INFO;
 static FILE* log_fp=NULL;
@@ -33,12 +28,6 @@ void log_close(){
     }
     pthread_mutex_destroy(&log_mutex);
 }
-void log_write(log_level_t lev,const char* file,int line,const char* fmt,...);
-#define LOG_DEBUG(fmt,...) log_write(LOG_DEBUG,__FILE__,__LINE__,fmt,##__VA_ARGS__)
-#define LOG_INFO(fmt,...) log_write(LOG_INFO,__FILE__,__LINE__,fmt,##__VA_ARGS__)
-#define LOG_WARN(fmt,...) log_write(LOG_WARN,__FILE__,__LINE__,fmt,##__VA_ARGS__)
-#define LOG_ERROR(fmt,...) log_write(LOG_ERROR,__FILE__,__LINE__,fmt,##__VA_ARGS__)
-#define LOG_FATAL(fmt,...) log_write(LOG_FATAL,__FILE__,__LINE__,fmt,##__VA_ARGS__)
 void log_write(log_level_t lev,const char *file,int line,const char *fmt,...){
     if(lev<level){
         return;
@@ -57,10 +46,4 @@ void log_write(log_level_t lev,const char *file,int line,const char *fmt,...){
     fflush(log_fp);
     pthread_mutex_unlock(&log_mutex);
 }
-// int main(){
-//     log_init("logfile",LOG_INFO);
-//     LOG_INFO("alloc size=%zu",128);
-//     log_close();
-//     return 0;
-// }
 

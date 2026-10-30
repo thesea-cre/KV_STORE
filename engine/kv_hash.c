@@ -2,7 +2,7 @@
 #include<stdio.h>
 #include<stdlib.h>
 #include<string.h>
-#include<kvstore.h>
+#include"tool.h"
 static int _hash(char *key,int size){
    if(!key) return -1;
    int sum=0;
@@ -53,7 +53,8 @@ void KV_Map_destory(KV_Map* hash){
         while(node!=NULL){
             KVNode *tmp=node;
             node=node->next;
-            hash->table[i]=node;
+            kv_free(tmp->key);//key/value是深拷贝的，先释放再释放节点
+            kv_free(tmp->value);
             kv_free(tmp);
         }
         kv_free(head);
@@ -81,6 +82,7 @@ int KV_Map_set(KV_Map*hash,char *key,char *value){
         KVNode *cor=create_node(key,value);
         cor->next=head->next;
         head->next=cor;
+        hash->count++;//链上追加也要计数（原实现漏了，只统计了空桶首插）
     }
     return 0;
 }
@@ -96,6 +98,7 @@ char * KV_Map_get(KV_Map* hash,char *key){
             if(strcmp(node->key,key)==0){
                 return node->value;
             }
+            node=node->next;//没找到就沿链前进，否则node不变死循环
         }
     }
     return NULL;
@@ -112,6 +115,8 @@ int KV_Map_del(KV_Map*hash,char *key){
         while(node!=NULL){
             if(strcmp(node->key,key)==0){
                 pre->next=node->next;
+                kv_free(node->key);//key/value是深拷贝的，先释放再释放节点
+                kv_free(node->value);
                 kv_free(node);
                 hash->count--;
                 return 0;
@@ -133,6 +138,13 @@ int KV_Map_mod(KV_Map*hash,char *key,char*value){
     }else{
         while(node!=NULL){
             if(strcmp(node->key,key)==0){
+                //新值可能比旧值长，必须free旧的重新malloc，直接strncpy进旧缓冲区会堆溢出
+                kv_free(node->value);
+                node->value=(char *)kv_malloc(strlen(value)+1);
+                if(node->value==NULL){
+                    return -2;
+                }
+                memset(node->value,0,strlen(value)+1);
                 strncpy(node->value,value,strlen(value));
                 return 0;
             }

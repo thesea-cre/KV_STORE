@@ -21,7 +21,7 @@
 # 	-I/home/snow/share/KV_STORE/include \
 
 # 	-g
-# LDFLAGS= -L/home/snow/share/KV_STORE/lib/liburing/src -luring -ldl -lpthread
+# LDFLAGS= -L/home/snow/share/KV_STORE/lib/liburing/src -luring -ldl -lpthread -ljemalloc
 # TESTCASE_SRC=testcase.c 
 # TESTCASE=testcase
 # OBJS := $(SRCS:.c=.o)

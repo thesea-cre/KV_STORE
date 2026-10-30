@@ -3,14 +3,14 @@
 #define ENABLE_REACTOR 0
 #define ENABLE_PROACTOR 1
 #define ENABLE_NTYCO 2
-#define NETWORK_SELECT ENABLE_PROACTOR//控制启用哪一个网络框架
+#define NETWORK_SELECT ENABLE_REACTOR//控制启用哪一个网络框架
 #define ENGINE_ARRAY 0
-#define ENGINE_HASH 1O
+#define ENGINE_HASH 1
 #define ENGINE_RBTREE 2
-#define ENGINE ENGINE_ARRAY//控制启用哪一种引擎
+#define ENGINE ENGINE_HASH//控制启用哪一种引擎
 #define KV_COMPLEX 1
 #ifndef INFO
-#define INFO  printf
+#define INFO  
 #endif  
 #define ENABLEKV 1
 #define TEST100w 0
@@ -27,26 +27,7 @@
 #include<stdlib.h>
 #include<string.h>
 #include<assert.h>
-/*核心层，上层是引擎层，协议层
-*/
-#include"kv_array.h"
-#include"kv_hash.h"
-#include"kv_rbtree.h"
-/*
-*/
-#include"kvproto.h"
-/*其它功能模块
-*/
-#include"mempool.h"
-
-#include"aof.h"
-
 #define KV_MAX_TOKENS 8
-extern int s_or_c;
-extern kv_array_t global_array;
-extern KV_Map global_hash;
-extern KV_Rbtree global_rbtree;
-extern  Mempool_Manager *mempool;
 
 int kv_protocol(char *msg,int len,result*c);
 int kv_incremental(char *rbuffer,int rlength);
@@ -54,25 +35,16 @@ int kv_incremental(char *rbuffer,int rlength);
 //int kv_slave_incremental(char *msg,int rlength);
 
 int kv_response(char *msg,int length,result*c);
-void *kv_malloc(size_t size);
-void kv_free(void* ptr);
-int kv_cmd_set(kv_request_t req,result*c);
-int kv_cmd_get(kv_request_t req,result*c);
-int kv_cmd_mod(kv_request_t req,result*c);
-int kv_cmd_del(kv_request_t req,result*c);
-int kv_cmd_exist(kv_request_t req,result*c);
-int kv_response_expectation(kv_request_t req,result*c,int cmd);
-int kv_set(char *key,char *value);
-char *kv_get(char *key);
-int kv_mod(char *key,char *value);
-int kv_del(char *key);
-int kv_exist(char *key);
-int kv_cmd_execute(kv_request_t *req,result *c,int cmd);
-extern int reactor_entry(char*ip,unsigned int port);
-extern int uring_start(char*ip,unsigned int port);
-extern int nytco(char*ip,unsigned int port);
-void init_kvengine(void);
-void dest_kvengine(void);
+
+int kv_cmd_set(kv_data_t req,result*c);
+int kv_cmd_get(kv_data_t req,result*c);
+int kv_cmd_mod(kv_data_t req,result*c);
+int kv_cmd_del(kv_data_t req,result*c);
+int kv_cmd_exist(kv_data_t req,result*c);
+int kv_response_expectation(kv_data_t req,result*c,int cmd);
+int kv_cmd_execute(kv_data_t *req,result *c,int cmd);
+
+
 enum{
     KV_CMD_START,
     KV_CMD_SET=KV_CMD_START,
@@ -80,7 +52,6 @@ enum{
     KV_CMD_DEL,
     KV_CMD_MOD,
     KV_CMD_EXIST,
-    
     KV_CMD_COUNT
 };
 enum{

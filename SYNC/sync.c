@@ -14,7 +14,6 @@
 MasterMgr mgr;
 Slave slave;
 // 64位整数网络字节序转换
-#define INFO printf
 static uint64_t htonll(uint64_t x) {
     return ((uint64_t)htonl((uint32_t)(x >> 32)) | ((uint64_t)htonl((uint32_t)x) << 32));
 }

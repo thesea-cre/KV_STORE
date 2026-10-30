@@ -12,6 +12,6 @@
 #include<stddef.h>
 #include<stdint.h>
 #include"kvstore.h"
-int kv_request(char *rbuffer,char *wbuffer,int rlength,int *wlength);
+int kv_request(char *rbuffer,char *wbuffer,int rlength,int *wlength,int *consumed);
 int kv_response(char *msg,int length,result*c);
 #endif

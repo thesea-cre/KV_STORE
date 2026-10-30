@@ -1,5 +1,4 @@
-#include "server.h"
-#include "sync.h"
+
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>

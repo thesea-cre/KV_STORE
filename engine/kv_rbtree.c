@@ -1,5 +1,5 @@
 #include "kv_rbtree.h"
-#include "kvstore.h"
+#include"tool.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,7 +30,7 @@ static kv_rb_node_t* _kv_rb_create_node(char *key, char *value)
     if (!node) return NULL;
 
     // 拷贝键
-    size_t klen = strlen(key) + 1;
+    uint32_t klen = strlen(key) + 1;
     node->key = (char *)kv_malloc(klen);
     if (!node->key) {
         kv_free(node);
@@ -40,7 +40,7 @@ static kv_rb_node_t* _kv_rb_create_node(char *key, char *value)
     strncpy(node->key, key, klen - 1);
 
     // 拷贝值
-    size_t vlen = strlen(value) + 1;
+    uint32_t vlen = strlen(value) + 1;
     node->value = (char *)kv_malloc(vlen);
     if (!node->value) {
         kv_free(node->key);
@@ -163,7 +163,7 @@ int KV_Rbtree_mod(KV_Rbtree *tree, char *key, char *value)
 
     // 释放旧值，分配新值
     kv_free(kv_node->value);
-    size_t vlen = strlen(value) + 1;
+    uint32_t vlen = strlen(value) + 1;
     kv_node->value = (char *)kv_malloc(vlen);
     if (!kv_node->value) return -2;
     memset(kv_node->value, 0, vlen);

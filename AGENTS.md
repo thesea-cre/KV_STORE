@@ -122,6 +122,9 @@ make -C SYNC        # 链接生成 SYNC/test_sync
 
 | 测试程序 | 源码 | 说明 |
 |---|---|---|
+| `engine/test_engine` | `engine/test_engine.c` | 引擎层单元测试：函数指针表统一驱动数组/哈希/红黑树三引擎（语义一致性、容量上限、哈希冲突、大规模增删），AddressSanitizer 默认开启，`make -C engine run` |
+| `protocol/test_kvproto` | `protocol/test_kvproto.c` | 协议编解码单元测试：协议头/TLV 往返、payload 解包、截断包与超 MAX_CMD 等恶意包防护，ASan 默认开启，`make -C protocol run` |
+| `mempool/test_mempool` | `mempool/test_mempool.c` | 内存池单元测试：独立池（复用/耗尽降级/double free 防护）、Manager 尺寸路由、8 线程压测，ASan 默认开启，`make -C mempool run` |
 | `protocol/kv_test` | `protocol/kv_test.c` | 协议头/TLV 编解码与命令处理的单元测试（assert 风格） |
 | `AOF/test_aof` | `AOF/test.c` | AOF 追加与恢复测试，`make -C AOF run` |
 | `SYNC/test_sync` | `SYNC/test.c` | 主从复制全链路单测：socketpair 模拟连接，覆盖全量（含 aof_recover 加载校验）→ 增量补发 → 增量在线，命令真实进引擎（kv_get 断言），`make -C SYNC run` |

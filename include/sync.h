@@ -69,10 +69,11 @@ extern Slave slave;
 写函数：buf:缓冲区，buf_len:缓冲区长度
 函数返回值：-2出错,-1等待，0结束
 */
-int master_init(MasterMgr *mgr);
+int master_init(MasterMgr *mgr);//初始化上下文
 void master_destory(MasterMgr* mgr);
 int master_append_cmd(MasterMgr *mgr, uint8_t* buf, uint32_t buf_len);
 int master_handle_sync(MasterMgr *mgr,int fd,uint8_t* buf,uint32_t buf_len);
+// int master_process(MasterMgr* mgr,Slaveconn* slave,char *buf,uint32_t buf_len);
 uint64_t master_full_sync(MasterMgr *mgr,Slaveconn* slave, const char *aof_path,uint8_t *buf,uint32_t buf_len);
 uint64_t master_incremental_sync(MasterMgr *mgr, Slaveconn* slave, uint8_t *buf,uint32_t buf_len);
 uint64_t master_online_sync(MasterMgr *mgr, Slaveconn* slave, uint8_t *buf,uint32_t buf_len);
@@ -83,7 +84,7 @@ Slaveconn* slave_find_by_fd(MasterMgr *mgr,int fd);
 void slave_remove_by_fd(MasterMgr *mgr, int fd);
 
 // 从节点函数
-int slave_init(Slave *slave);
+int slave_init(Slave *slave);//初始化从服务器上下文
 void slave_destory(Slave* slave);
 int slave_send_sync(Slave *slave,char *buf,int buf_len);
 uint64_t slave_process(Slave *slave, uint8_t *buf, uint32_t buf_len);
