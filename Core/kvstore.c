@@ -16,11 +16,9 @@ void KV_sync(char *rbuffer,int rlength,char *wbuffer,int wlength,int *cons,int *
 #include"tool.h"
 
 extern int s_or_c;
-static  char* type_[]={
-    "start","string","image","url","else"
-};
+
 #if AOF
-char huge_buf[4096]={0};
+char huge_buf[64*1024]={0};
 int huge_buf_len=0;
 int huge_num=0;
 #endif

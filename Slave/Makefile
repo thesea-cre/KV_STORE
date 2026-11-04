@@ -45,6 +45,7 @@ SRCS:= ../Core/kvstore.c  ../protocol/kvproto.c ../Tool/tool.c ../mempool/mempoo
 		../network/nytco/ctx_switch.S \
 		../AOF/aof.c  \
 		../SYNC/sync_new.c\
+		../log/log.c  \
 		main.c
 CFLAGS:= 	-I../protocol \
 			-I../engine \
@@ -55,6 +56,7 @@ CFLAGS:= 	-I../protocol \
 			-I../Core \
 			-I../AOF \
 			-I../SYNC \
+			-I../log   \
 			-I/home/snow/share/KV_STORE/lib/liburing/src/include \
 			-I../network/nytco  \
 			-g -w

@@ -13,15 +13,21 @@ static int kv_payload_encode(const kv_payload_t data,uint8_t *buf,uint32_t buf_l
 static int kv_payload_decode(kv_payload_t *data,uint8_t* payload,uint32_t payload_len);
 static void kv_payload_t_init(kv_payload_t *req);
 static void kv_payload_t_destory(kv_payload_t *req);
- char *command[]={
-    "SET","GET","DEL","MOD","EXIST","RES","ELSE CMD"
-};
- char *response[]={
+//  char *command[]={
+//     "SET","GET","DEL","MOD","EXIST","RES","ELSE CMD"
+// };
+const char *response[]={
     "OK","ERROR","EXIST","NOT EXIST"
 };
-static char* type_[]={
+const char *command[]={
+    "SET","GET","DEL","MOD","EXIST","RES","SET_CHUNK","ELSE CMD"
+};
+const char* type_[]={
     "start","string","image","url","else"
 };
+// static char* type_[]={
+//     "start","string","image","url","else"
+// };
 
 static const uint8_t dummy_=0;
 static int kv_header_encode(const kv_header_t header,uint8_t* buf,uint32_t buf_len){
@@ -286,6 +292,7 @@ void KV_encode(uint8_t *buf,uint32_t buf_len,RES *res){
         sprintf(res->error_info,"payload.array malloc failed");
         return;
     }
+
     switch(head.opcode){
         case KV_CMD_SET:
         case KV_CMD_MOD:
@@ -498,3 +505,4 @@ void KV_decode(uint8_t *buf,uint32_t buf_len,RES *res){
 }   
 //encode，数据在key,value中，经过一次深拷贝，在kv_tlv_encode中，拷贝到了buf中，payload,tlv等结构体都是浅拷贝，指向数据
 //decode,数据在buf中，经过深拷贝到结构体payload中，然后所有权转给key,value,释放payload->array
+

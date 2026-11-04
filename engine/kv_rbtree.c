@@ -3,7 +3,43 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
+#include"log.h"
+// typedef struct queue{
+//     struct kv_rb_node* head;
+//     struct kv_rb_node* tail;
+//     int num;
+// }queue_;
+// void queue_init(queue_* que){
+//     que->head=(kv_rb_node_t*)kv_malloc(sizeof(kv_rb_node_t));
+//     que->tail=(kv_rb_node_t*)kv_malloc(sizeof(kv_rb_node_t));
+//     que->head->next=que->tail;
+//     que->tail->pre=que->head;
+//     que->head->pre=NULL;
+//     que->tail->next=NULL;
+//     que->num=0;
+// }
+// void queue_destory(queue_ *que){
+//     kv_free(que->head);
+//     kv_free(que->tail);
+//     que->num=0;
+// }
+// void push_(queue_* que,kv_rb_node_t* ex){
+//     ex->next=que->tail;
+//     ex->pre=que->tail->pre;
+//     que->tail->pre->next=ex;
+//     que->tail->next=NULL;
+//     que->tail->pre=ex;
+//     que->num++;
+// }
+// kv_rb_node_t* pull_(queue_* que){
+//     kv_rb_node_t* res=que->head->next;
+//     que->head->next=res->next;
+//     res->next->pre=que->head;
+//     res->next=NULL;
+//     res->pre=NULL;
+//     que->num--;
+//     return res;
+// }
 // ========== 内部辅助函数 ==========
 
 // 节点比较函数：用于红黑树插入排序
@@ -22,7 +58,7 @@ static int _kv_rb_cmp_key(const struct rb_node *node, const void *key)
 }
 
 // 创建新KV节点（深拷贝键值）
-static kv_rb_node_t* _kv_rb_create_node(char *key, char *value)
+static kv_rb_node_t* _kv_rb_create_node(char *key, uint8_t *value,uint32_t value_len)
 {
     if (!key || !value) return NULL;
 
@@ -40,7 +76,7 @@ static kv_rb_node_t* _kv_rb_create_node(char *key, char *value)
     strncpy(node->key, key, klen - 1);
 
     // 拷贝值
-    uint32_t vlen = strlen(value) + 1;
+    uint32_t vlen = value_len;
     node->value = (char *)kv_malloc(vlen);
     if (!node->value) {
         kv_free(node->key);
@@ -48,7 +84,9 @@ static kv_rb_node_t* _kv_rb_create_node(char *key, char *value)
         return NULL;
     }
     memset(node->value, 0, vlen);
-    strncpy(node->value, value, vlen - 1);
+    memcpy(node->value, value, vlen);
+    node->value_len=vlen;
+
 
     return node;
 }
@@ -72,16 +110,27 @@ static void _kv_rb_destroy_tree(struct rb_node *node)
     _kv_rb_free_node(kv_node);
 }
 
-// 中序遍历打印（辅助遍历函数）
-static void _kv_rb_print_tree(struct rb_node *node)
+// 前序遍历打印（辅助遍历函数）
+static struct kv_rb_node* _kv_rb_tra_tree(struct rb_node *node,uint8_t** key,uint8_t **value,uint32_t *value_len,int i)
 {
-    if (!node) return;
-    _kv_rb_print_tree(node->rb_left);
+    if (!node) return NULL;
     kv_rb_node_t *kv_node = rb_entry(node, kv_rb_node_t, node);
-    printf("key:%s,value:%s\n", kv_node->key, kv_node->value);
-    _kv_rb_print_tree(node->rb_right);
+    key[i]=kv_node->key;
+    value[i]=kv_node->value;
+    value_len[i]=kv_node->value_len;
+    _kv_rb_tra_tree(node->rb_left,key,value,value_len,2*i+1);
+    _kv_rb_tra_tree(node->rb_right,key,value,value_len,2*i+2);
 }
-
+// //层序遍历
+// static void _kv_rb_tra_tree(struct rb_node* node,uint8_t **value,uint32_t *value_len){
+//     queue_ *queue=(queue_*)kv_malloc(sizeof(queue_));
+//     queue_init(queue);
+//     kv_rb_node_t* root=rb_entry(node,kv_rb_node_t,node);
+//     push(queue,root);
+//     while(queue->num!=0){
+        
+//     }
+// }
 // ========== 对外接口实现 ==========
 
 int KV_Rbtree_create(KV_Rbtree *tree)
@@ -100,7 +149,7 @@ void KV_Rbtree_destory(KV_Rbtree *tree)
     tree->count = 0;
 }
 
-int KV_Rbtree_set(KV_Rbtree *tree, char *key, char *value)
+int KV_Rbtree_set(KV_Rbtree *tree, char *key, uint8_t *value,uint32_t value_len)
 {
     if (!tree || !key || !value) return -1;
 
@@ -111,24 +160,26 @@ int KV_Rbtree_set(KV_Rbtree *tree, char *key, char *value)
     }
 
     // 创建新节点
-    kv_rb_node_t *new_node = _kv_rb_create_node(key, value);
+    kv_rb_node_t *new_node = _kv_rb_create_node(key, value,value_len);
     if (!new_node) return -2;
-
     // 插入红黑树
     rb_insert(&tree->root, &new_node->node, _kv_rb_node_cmp);
     tree->count++;
     return 0;
 }
 
-char* KV_Rbtree_get(KV_Rbtree *tree, char *key)
+int KV_Rbtree_get(KV_Rbtree *tree, char *key,uint8_t **value,uint32_t *value_len)
 {
-    if (!tree || !key) return NULL;
+    if (!tree || !key) return -2;
 
     struct rb_node *found = rb_find(&tree->root, key, _kv_rb_cmp_key);
-    if (!found) return NULL;
+    if (!found) return -1;
 
     kv_rb_node_t *kv_node = rb_entry(found, kv_rb_node_t, node);
-    return kv_node->value;
+    *value=kv_node->value;
+    *value_len=kv_node->value_len;
+
+    return 0;
 }
 
 int KV_Rbtree_del(KV_Rbtree *tree, char *key)
@@ -150,7 +201,7 @@ int KV_Rbtree_del(KV_Rbtree *tree, char *key)
     return 0;
 }
 
-int KV_Rbtree_mod(KV_Rbtree *tree, char *key, char *value)
+int KV_Rbtree_mod(KV_Rbtree *tree, char *key, uint8_t *value,uint32_t value_len)
 {
     if (!tree || !key || !value) return -1;
 
@@ -163,11 +214,12 @@ int KV_Rbtree_mod(KV_Rbtree *tree, char *key, char *value)
 
     // 释放旧值，分配新值
     kv_free(kv_node->value);
-    uint32_t vlen = strlen(value) + 1;
-    kv_node->value = (char *)kv_malloc(vlen);
+    uint32_t vlen = value_len;
+    kv_node->value = (uint8_t *)kv_malloc(vlen);
     if (!kv_node->value) return -2;
     memset(kv_node->value, 0, vlen);
-    strncpy(kv_node->value, value, vlen - 1);
+    memcpy(kv_node->value, value, vlen);
+    kv_node->value_len = vlen; 
 
     return 0;
 }
@@ -178,11 +230,14 @@ int KV_Rbtree_exist(KV_Rbtree *tree, char *key)
     return rb_find(&tree->root, key, _kv_rb_cmp_key) ? 1 : 0;
 }
 
-void KV_Rbtree_traverse(KV_Rbtree *tree)
+void KV_Rbtree_traverse(KV_Rbtree *tree,uint8_t**key,uint8_t **value,uint32_t *value_len)
 {
     if (!tree) return;
-    printf("rbtree count:%d\n", tree->count);
-    _kv_rb_print_tree(tree->root.rb_node);
+    _kv_rb_tra_tree(tree->root.rb_node,key,value,value_len,0);
+
+}
+int KV_Rbtree_count(KV_Rbtree* tree){
+    return tree->count;
 }
 // 清理输入缓冲区，防止scanf残留导致死循环
 static void clear_stdin(void)
@@ -191,128 +246,3 @@ static void clear_stdin(void)
     while ((c = getchar()) != '\n' && c != EOF);
 }
 
-// int main()
-// {
-//     KV_Rbtree tree;
-//     int ret = KV_Rbtree_create(&tree);
-//     if (ret != 0) {
-//         printf("KV_Rbtree 创建失败\n");
-//         return -1;
-//     }
-
-//     char key[128] = {0};
-//     char value[128] = {0};
-
-//     printf("===== KV 存储引擎（红黑树实现）=====\n");
-//     while (1) {
-//         int opt = 0;
-//         printf("\n----- 命令菜单 -----\n");
-//         printf("0: 插入键值对  set key value\n");
-//         printf("1: 查询键值    get key\n");
-//         printf("2: 删除键值    del key\n");
-//         printf("3: 修改键值    mod key value\n");
-//         printf("4: 判断存在    exist key\n");
-//         printf("5: 遍历全部    traverse\n");
-//         printf("其他: 退出程序\n");
-//         printf("请输入命令编号: ");
-
-//         if (scanf("%d", &opt) != 1) {
-//             printf("输入格式错误，请输入数字\n");
-//             clear_stdin();
-//             continue;
-//         }
-
-//         switch (opt) {
-//             case 0:
-//                 printf("请输入 key 和 value（空格分隔）: ");
-//                 if (scanf("%127s %127s", key, value) != 2) {
-//                     printf("输入格式错误\n");
-//                     clear_stdin();
-//                     break;
-//                 }
-//                 ret = KV_Rbtree_set(&tree, key, value);
-//                 if (ret == 0)
-//                     printf("插入成功\n");
-//                 else if (ret == 1)
-//                     printf("插入失败：键已存在\n");
-//                 else
-//                     printf("插入失败：系统错误\n");
-//                 break;
-
-//             case 1:
-//                 printf("请输入 key: ");
-//                 if (scanf("%127s", key) != 1) {
-//                     printf("输入格式错误\n");
-//                     clear_stdin();
-//                     break;
-//                 }
-//                 char *vl = KV_Rbtree_get(&tree, key);
-//                 if (vl == NULL)
-//                     printf("查询失败：键不存在\n");
-//                 else
-//                     printf("查询成功，value = %s\n", vl);
-//                 break;
-
-//             case 2:
-//                 printf("请输入 key: ");
-//                 if (scanf("%127s", key) != 1) {
-//                     printf("输入格式错误\n");
-//                     clear_stdin();
-//                     break;
-//                 }
-//                 ret = KV_Rbtree_del(&tree, key);
-//                 if (ret == 0)
-//                     printf("删除成功\n");
-//                 else if (ret == 1)
-//                     printf("删除失败：键不存在\n");
-//                 else
-//                     printf("删除失败：系统错误\n");
-//                 break;
-
-//             case 3:
-//                 printf("请输入 key 和 新value（空格分隔）: ");
-//                 if (scanf("%127s %127s", key, value) != 2) {
-//                     printf("输入格式错误\n");
-//                     clear_stdin();
-//                     break;
-//                 }
-//                 ret = KV_Rbtree_mod(&tree, key, value);
-//                 if (ret == 0)
-//                     printf("修改成功\n");
-//                 else if (ret == 1)
-//                     printf("修改失败：键不存在\n");
-//                 else
-//                     printf("修改失败：系统错误\n");
-//                 break;
-
-//             case 4:
-//                 printf("请输入 key: ");
-//                 if (scanf("%127s", key) != 1) {
-//                     printf("输入格式错误\n");
-//                     clear_stdin();
-//                     break;
-//                 }
-//                 ret = KV_Rbtree_exist(&tree, key);
-//                 if (ret == 1)
-//                     printf("键 %s 存在\n", key);
-//                 else if (ret == 0)
-//                     printf("键 %s 不存在\n", key);
-//                 else
-//                     printf("查询失败：系统错误\n");
-//                 break;
-
-//             case 5:
-//                 printf("\n----- 全部键值对 -----\n");
-//                 KV_Rbtree_traverse(&tree);
-//                 break;
-
-//             default:
-//                 printf("退出程序\n");
-//                 goto exit_program;
-//         }
-//     }
-
-// exit_program:
-//     KV_Rbtree_destory(&tree);
-//     return 0;
-// }

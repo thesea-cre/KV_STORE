@@ -8,7 +8,6 @@
 #include<netinet/in.h>
 #include<arpa/inet.h>
 #include<sys/time.h>
-#include"reactor.h"
 #include"kvstore.h"
 #include"tool.h"
 #if AOF
@@ -27,7 +26,30 @@ void notify(int fd);
 int accept_slave_cb(int fd);
 
 #endif
-
+#define LISTENFD 1
+#define LISTEN_CLIENT LISTENFD
+#define LISTEN_SLAVE 4
+#define CLIENTFD 0
+#define SERVER_MASTER 2
+#define SERVER_SLAVE 3
+#define EVENT_SIZE 1024
+typedef int (*ECALLBACK)(int fd);
+struct conn{
+    int fd;
+    //status=0,初态。status=1，接收态，status=2,发送，status=2,处理态，status=-1,关闭
+    int status;//
+    int is_listenfd;
+    char rbuffer[BUFFER_SIZE];//应用层数据累积缓冲区，这里该考虑一下环形缓冲区，这样可以好移除已经处理的数据，实际这里用的是线性缓冲区
+    int rlength;//已经累积的数据的长度
+    char wbuffer[BUFFER_SIZE];
+    int wlength;//
+    //result res;
+    ECALLBACK send_callback;
+    union{
+        ECALLBACK recv_callback;//读回调是业务入口
+        ECALLBACK accept_callback;//写回调是网络出口
+    }r_action;
+};
 #if NETWORK_SELECT == ENABLE_REACTOR//只在选中epoll时编译，与uring_tcp_server.c互斥，避免同名函数撞链接
 int epfd; 
 
@@ -37,14 +59,7 @@ int send_cb(int fd);
 static struct timeval begin;
 extern int s_or_c;
 
-// int recv_server_cb(int fd,void *arg);
-// int send_server_cb(int fd,void*arg);
-// int accept_slave_cb(int fd,void *arg);
-// int recv_from_slave_cb(int fd, void *arg);
-// int send_to_slave_cb(int fd,void* arg);
-// void master_notify_slaves(MasterMgr *mgr);
-
-struct conn connection[CONNECTION_SIZE]={0};
+struct conn connection[MAX_CONNECT]={0};
 
 int init_server(char*ip,int port){//初始化服务器
     int socketfd=socket(AF_INET,SOCK_STREAM,0);//socket()
@@ -115,8 +130,8 @@ int cancel_event(int fd){//移除io函数
 int event_register(int fd,int event,int flag){//事件注册函数，调用刚刚的set_event()，设置监听io事件类型，
     //把fd加入到事件表中
     connection[fd].fd=fd;
-    memset(connection[fd].rbuffer,0,BUFFER_SIZE);//把收发缓冲区清空
-    memset(connection[fd].wbuffer,0,BUFFER_SIZE);
+    memset(connection[fd].rbuffer,0,sizeof(connection[fd].rbuffer));//把收发缓冲区清空
+    memset(connection[fd].wbuffer,0,sizeof(connection[fd].wbuffer));
     connection[fd].rlength=0;
     connection[fd].wlength=0;
     connection[fd].status=0;
@@ -238,17 +253,23 @@ int recv_cb(int fd){//处理粘包，分包
         #if ENABLEKV
         int cons_=0;
         connection[fd].rlength+=ret;
+        INFO("接受了%d bytes\n",ret);
+        INFO("rlength=%d bytes \n",connection[fd].rlength);
         KV_server(connection[fd].rbuffer,connection[fd].rlength,connection[fd].wbuffer,
         BUFFER_SIZE,&cons_,&connection[fd].wlength);
         if(cons_<connection[fd].rlength){
             memmove(connection[fd].rbuffer,connection[fd].rbuffer+cons_,connection[fd].rlength-cons_);
         }
+        INFO("这次处理了%d bytes\n",cons_);
         connection[fd].rlength-=cons_;
         if(connection[fd].wlength>0){
             set_event(fd,EPOLLOUT);
         }else{
             set_event(fd,EPOLLIN);
         }
+        #else
+        INFO("服务端接受 %s, %d (bytes)\n");
+        set_event(fd,EPOLLOUT);
         #endif
         return 0;
     }
@@ -273,10 +294,14 @@ int send_cb(int fd){
         close(fd);
         return 0;
     }else{
+        #if KV_COMPLEX
         INFO("server send to clientd:( %s)   %d(bytes)\n",connection[fd].wbuffer,set);
         connection[fd].wlength-=set;
         INFO("wbuffer中还有多少数据：%d\n",connection[fd].wlength);
         set_event(fd,EPOLLIN);
+        #elif 
+        set_event(fd,EPOLLIN);
+        #endif
     }
 }
 #if SYNC
@@ -395,248 +420,6 @@ int reactor_entry(char*ip,unsigned int port){
         }
     }
 }
-// int recv_from_slave_cb(int fd, void *arg) {//先做简单一些，因为只是发psync请求
-//     char buf[BUFFER_SIZE]={0};
-//     int ret;
-//     ret=recv(fd,buf,BUFFER_SIZE,0);
-//    // hex_dump(buf,ret,"主服务器收\n");
-//     INFO("recv到栈的数据长度：%d(bytes)\n",ret);
-//     if(ret<0){
-//         perror("recv");
-//         slave_remove_by_fd(&mgr, fd);
-//         cancel_event(fd);
-//         memset(&connection[fd],0,sizeof(struct conn));
-//         close(fd);
-//         return -1;
-//     }else if(ret == 0){
-//         INFO("fd: %d is diconnected\n",fd);
-//         slave_remove_by_fd(&mgr, fd);
-//         cancel_event(fd);
-//         memset(&connection[fd],0,sizeof(struct conn));
-//         close(fd);
-//         return 0;
-//     }else{
-//         if(connection[fd].rlength+ret>BUFFER_SIZE){
-//             INFO("recv_from_slave_cb: 持久缓冲区溢出，关闭fd %d\n",fd);
-//             cancel_event(fd);
-//             memset(&connection[fd],0,sizeof(struct conn));
-//             close(fd);
-//             return -1;
-//         }
-//         memcpy(connection[fd].rbuffer+connection[fd].rlength,buf,ret);
-//         connection[fd].rlength+=ret;
-//         int handled=master_handle_sync(&mgr,fd,connection[fd].rbuffer,connection[fd].rlength);
-//         if(handled<=0){//WAIT：不足20字节留在缓冲区等下一段；OVER：暂不认识的包
-//             set_event(fd,EPOLLIN);
-//             return 0;
-//         }
-//         connection[fd].rlength-=handled;
-//         if(connection[fd].rlength>0){
-//             memmove(connection[fd].rbuffer,connection[fd].rbuffer+handled,connection[fd].rlength);
-//         }
-//         Slaveconn *sconn=slave_find_by_fd(&mgr,fd);
-//         if(sconn&&sconn->status!=0){
-//             set_event(fd,EPOLLOUT);
-//         }else{
-//             set_event(fd,EPOLLIN);
-//         }
-//         return 0;
-//     }
-//     return 0;
-// }
 
-// //要么主服务器传字节流，全量重传，要么是写命令，增量重传
-// int recv_server_cb(int fd,void *arg){
-//     char buf[BUFFER_SIZE]={0};
-//     int ret;
-//     ret=recv(fd,buf,BUFFER_SIZE,0);
-//    // hex_dump(buf,ret,"从服务器收\n");
-//     INFO("recv到栈的数据长度：%d(bytes)\n",ret);
-//     if(ret<0){
-//         perror("recv");
-//         cancel_event(fd);
-//         memset(&connection[fd],0,sizeof(struct conn));
-//         close(fd);
-//         return -1;
-//     }else if(ret == 0){
-//         INFO("fd: %d is diconnected\n",fd);
-//         cancel_event(fd);
-//         memset(&connection[fd],0,sizeof(struct conn));
-//         close(fd);
-//         return 0;
-//     }else{
-//         //情景1，持久缓冲区有剩余数据
-//         if(connection[fd].rlength>0){
-//             INFO("持久缓冲区有数据\n");
-//             if(connection[fd].rlength+ret>BUFFER_SIZE){
-//                 cancel_event(fd);
-//                 memset(&connection[fd],0,sizeof(struct conn));
-//                 close(fd);
-//                 return -1;
-//             }
-//             memcpy(connection[fd].rbuffer+connection[fd].rlength,buf,ret);
-//             int processed=0;
-//             while(processed<connection[fd].rlength){
-//                 INFO("进入slave_process函数处理数据\n");
-//                 int offset=slave_process(&slave,connection[fd].rbuffer+processed,
-//                     connection[fd].rlength-processed);
-//                     INFO("slave_process这次处理了的字节数：%d(bytes)\n",offset);
-
-//                 INFO("processed已经处理了的字节数:%d(bytes)\n",processed);
-//                 if(offset<=0){//0=本段没处理完；-1=WAIT等数据；-2=ERROR，都停下等下一段
-//                     set_event(fd,EPOLLIN);
-//                     break;
-//                 }
-//                 processed+=offset;
-//             }
-//             connection[fd].rlength-=processed;
-//             INFO("这次recv到持久缓冲区处理的总字节数：%d(bytes)\n",processed);
-//             INFO("持久化缓冲区剩余的字节数：%d(bytes)\n",connection[fd].rlength);
-//             if(connection[fd].rlength>0){//缓冲区前移
-//                 memmove(connection[fd].rbuffer,connection[fd].rbuffer+processed,
-//                     connection[fd].rlength);
-//             }
-
-//             return 0;
-//         }
-//         //情景2：持久缓冲区没有剩余数据，直接在栈上处理数据
-//         int buf_offset=0;
-//         while(buf_offset<ret){
-//             int offset=slave_process(&slave,buf+buf_offset,ret-buf_offset);
-//             if(offset<=0){//0=本段没处理完；-1=WAIT等数据；-2=ERROR，都停下等下一段
-//                 set_event(fd,EPOLLIN);
-//                 break;
-//             }
-//             buf_offset+=offset;
-//         }
-//         INFO("这次recv直接在栈上处理的总字节数：%d(bytes)\n",buf_offset);
-//         INFO("栈内剩余的字节数：%d(bytes)\n",ret-buf_offset);
-//         if(buf_offset<ret){
-//             memcpy(connection[fd].rbuffer+connection[fd].rlength,buf+buf_offset,ret-buf_offset);
-//             connection[fd].rlength+=ret-buf_offset;
-//         }
-
-//         return 0;
-//     }
-// }
-//写路径传播钩子：status 1(全量)不需要唤醒——全量收尾SYNC_END时本就留着EPOLLOUT，
-//online_sync会从FULLRESYNC时对齐的slave_offset续传；只唤醒处于发送态的2/3
-// void master_notify_slaves(MasterMgr *mgr) {
-//     if (!mgr) return;
-//     Slaveconn *cur = mgr->slave_head;
-//     while (cur) {
-//         if ((cur->status == 2 || cur->status == 3) && cur->fd >= 0) {
-//             set_event(cur->fd, EPOLLOUT);
-//         }
-//         cur = cur->next;
-//     }
-// }
-
-// //全量重传字节流,增量重传TLV，
-// int send_to_slave_cb(int fd,void* arg){
-//     int set;
-//     char buf[BUFFER_SIZE]={0};
-//     int buf_len=BUFFER_SIZE;
-//     Slaveconn *slave=slave_find_by_fd(&mgr,fd);
-//     if(!slave){//还没有PSYNC建立上下文，继续等请求，不能把EPOLLOUT留着空转
-//         set_event(fd,EPOLLIN);
-//         return 0;
-//     }
-//     int ret=0;
-//     if(slave->status==1){
-//         INFO("走全量重传\n");
-//         ret=master_full_sync(&mgr,slave,"aof_db",buf,buf_len);
-//     }else if(slave->status==2){
-//         INFO("走增量重传\n");
-//         ret=master_incremental_sync(&mgr,slave,buf,buf_len);
-//     }else if(slave->status==3){
-//         INFO("在线转发\n");
-//         ret=master_online_sync(&mgr,slave,buf,buf_len);
-//     }
-//     if(ret<0){//上层出错
-//         INFO("master sync error\n");
-//         slave_remove_by_fd(&mgr, fd);
-//         cancel_event(fd);
-//         memset(&connection[fd],0,sizeof(struct conn));
-//         close(fd);
-//         return -1;
-//     }
-//     if(ret==0){//无数据可发：统一回EPOLLIN挂起，等kv写路径唤醒（master_notify_slaves）或从节点消息
-//         if(slave->status==3){
-//             set_event(fd,EPOLLIN);
-//         }else if(slave->status==4){//online_sync淘汰或上层出错：摘链并断开
-//             slave_remove_by_fd(&mgr, fd);
-//             cancel_event(fd);
-//             memset(&connection[fd],0,sizeof(struct conn));
-//             close(fd);
-//         }else{
-//             set_event(fd,EPOLLIN);
-//         }
-//         return 0;
-//     }
-//     set=send(fd,buf,ret,0);
-//    // hex_dump(buf,set,"主服务器发\n");
-//     // else{//先不删
-//     //     memcpy(connection[fd].wbuffer+connection[fd].wlength,buf,buf_len);
-//     //     connection[fd].wlength+=buf_len;
-//     //     set= send(fd,connection[fd].wbuffer,connection[fd].wlength,0);//send之后不一定是recv，我再send
-//     // }
-//     if(set<0){
-//         perror("send");
-//         slave->status=4;
-//         slave->fd=-1;
-//         cancel_event(fd);
-//         memset(&connection[fd],0,sizeof(struct conn));
-//         close(fd);
-//         return -1;
-//     }else{
-//         set_event(fd,EPOLLOUT);
-//     }
-// }
-// //包含发送心跳包，发送同步请求,目前还没有发送心跳包
-// int send_server_cb(int fd,void* arg){
-//     int set;
-//     char buf[BUFFER_SIZE]={0};
-//     int  buf_len=BUFFER_SIZE;
-//     int ret=slave_send_sync(&slave,buf,buf_len);
-//     INFO("slave send sync return ret:%d\n",ret);
-//     // if(connection[fd].wlength==0){//不经过缓冲区直接发
-//     //     set=send(fd,buf,buf_len,0);
-//     // }
-//     if(ret<=0){
-//         set_event(fd,EPOLLIN);
-//         return 0;
-//     }
-//     set=send(fd,buf,ret,0);
-//  //   hex_dump(buf,set,"从服务器发\n");
-    
-    
-//     // else{
-//     //     memcpy(connection[fd].wbuffer+connection[fd].wlength,buf,buf_len);
-//     //     connection[fd].wlength+=buf_len;
-//     //     set= send(fd,connection[fd].wbuffer,connection[fd].wlength,0);//send之后不一定是recv，我再send
-//     // }
-//     if(set<0){
-//         perror("send");
-//         cancel_event(fd);
-//         close(fd);
-//         return -1;
-//     }else if(set == 0){
-//         printf("fd: %d is diconnected\n",fd);
-//         memset(&connection[fd],0,sizeof(struct conn));
-//         cancel_event(fd);
-//         close(fd);
-//         return 0;
-//     }else{
-//         // if(connection[fd].wlength!=0){
-//         //     connection[fd].wlength-=set;
-//         // }
-//         // if(connection[fd].wlength>0){
-//         //     memmove(connectionp[fd].wbuffer,connection[fd].wbuffer+connection[fd].wlength,
-//         //         connection[fd].wlength);
-//         // }
-//         set_event(fd,EPOLLIN);
-//     }
-// }
 
 #endif//NETWORK_SELECT == ENABLE_REACTOR
