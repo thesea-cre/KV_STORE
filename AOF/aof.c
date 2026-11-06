@@ -12,6 +12,7 @@
 #include<sys/uio.h>
 static int read_full(int fd,char* buf,uint32_t len);
 static int write_full(int fd,char *buf,uint32_t len);
+static int aof_st_write(AOFcontext_ctx *ctx);
 static void* kv_malloc(int size){
     return malloc(size);
 }
@@ -24,27 +25,57 @@ AOFcontext_ctx *aof_init(const char *db_file_path,const char *st_file_path){
     AOFcontext_ctx * ctx=(AOFcontext_ctx*)kv_malloc(sizeof(AOFcontext_ctx));
     if(!ctx) return NULL;
     memset(ctx,0,sizeof(AOFcontext_ctx));
+    ctx->db_fd=-1;
+    ctx->st_fd=-1;
 
     ctx->db_fd=open(db_file_path,O_RDWR|O_CREAT,0664);
     if(ctx->db_fd<0){
         perror("aof_init open failed");
+        kv_free(ctx);
         return NULL;
     }
     ctx->st_fd=open(st_file_path,O_RDWR|O_CREAT,0664);
     if(ctx->st_fd<0){
         perror("aof_init open failed");
+        close(ctx->db_fd);
+        kv_free(ctx);
         return NULL;
     }
-    int n = read(ctx->st_fd, &ctx->size, sizeof(int));
-    if (n != sizeof(int)) {
-        ctx->size = 0; // 新文件或读取失败
-        // 如果是新文件，为了保证后续 lseek 写入正常，最好把初始状态写进去
-        lseek(ctx->st_fd, 0, SEEK_SET);
-        write(ctx->st_fd, &ctx->size, sizeof(int));
-        write(ctx->st_fd, &ctx->current_count, sizeof(int));
-    } else {
-        read(ctx->st_fd, &ctx->current_count, sizeof(int));
+
+    /* st 文件：20 字节=新格式；8 字节=旧格式（迁移）；其他=新建 */
+    struct stat st;
+    if(fstat(ctx->st_fd,&st)!=0) st.st_size=0;
+
+    if(st.st_size==AOF_ST_LEN){
+        unsigned char buf[AOF_ST_LEN];
+        if(read_full(ctx->st_fd,(char*)buf,AOF_ST_LEN)==AOF_ST_LEN){
+            uint32_t magic,ver,count;
+            uint64_t size;
+            memcpy(&magic,buf+0,4);
+            memcpy(&ver,buf+4,4);
+            memcpy(&size,buf+8,8);
+            memcpy(&count,buf+16,4);
+            if(magic==AOF_ST_MAGIC&&ver==AOF_ST_VERSION){
+                ctx->size=(off_t)size;
+                ctx->current_count=(int)count;
+            }
+        }
+    }else if(st.st_size==8){
+        int size32=0,count32=0;
+        if(read_full(ctx->st_fd,(char*)&size32,4)==4&&
+           read_full(ctx->st_fd,(char*)&count32,4)==4){
+            ctx->size=(off_t)size32;
+            ctx->current_count=count32;
+        }
+        aof_st_write(ctx);   /* 旧格式迁移成新格式 */
+    }else{
+        ctx->size=0;
+        ctx->current_count=0;
+        aof_st_write(ctx);
     }
+
+    /* 恢复从文件头顺序读，读完位置自然在末尾 */
+    lseek(ctx->db_fd,0,SEEK_SET);
     return ctx;
 }
 
@@ -60,66 +91,121 @@ static int write_full(int fd,char *buf,uint32_t len){
     return offset;
 }
 
+/* writev 可能部分写（大 value 落盘时尤其要考虑），循环补齐 */
+static int writev_full(int fd, struct iovec *iov, int iovcnt){
+    int total=0;
+    int idx=0;
+    while(idx<iovcnt){
+        ssize_t n=writev(fd,iov+idx,iovcnt-idx);
+        if(n<0) return ERROR;
+        if(n==0) break;
+        total+=(int)n;
+        int remain=(int)n;
+        while(idx<iovcnt&&remain>=(int)iov[idx].iov_len){
+            remain-=(int)iov[idx].iov_len;
+            idx++;
+        }
+        if(idx<iovcnt&&remain>0){
+            iov[idx].iov_base=(char*)iov[idx].iov_base+remain;
+            iov[idx].iov_len-=(size_t)remain;
+        }
+    }
+    return total;
+}
+
+/* 写状态文件：magic + version + size(u64) + count(u32) */
+static int aof_st_write(AOFcontext_ctx *ctx){
+    unsigned char buf[AOF_ST_LEN];
+    uint32_t magic=AOF_ST_MAGIC;
+    uint32_t ver=AOF_ST_VERSION;
+    uint64_t size;
+    uint32_t count;
+
+    if(!ctx||ctx->st_fd<0) return ERROR;
+
+    size=(uint64_t)ctx->size;
+    count=(uint32_t)ctx->current_count;
+
+    memcpy(buf+0,&magic,4);
+    memcpy(buf+4,&ver,4);
+    memcpy(buf+8,&size,8);
+    memcpy(buf+16,&count,4);
+
+    if(lseek(ctx->st_fd,0,SEEK_SET)<0) return ERROR;
+    return (write_full(ctx->st_fd,(char*)buf,AOF_ST_LEN)==AOF_ST_LEN)?OK:ERROR;
+}
+
 void aof_rewrite(AOFcontext_ctx* ctx){
     if(!ctx) return;
-    ctx->current_count=kv_count();
-    if(ctx->current_count==0){
-        lseek(ctx->st_fd, 0, SEEK_SET);
-        write(ctx->st_fd, 0, sizeof(int));
-        write(ctx->st_fd, 0, sizeof(int));
 
-        ftruncate(ctx->db_fd,0);
+    int count=kv_count();
+    if(count<=0){
+        /* 空库：清空 db，状态归零（原来 write(fd, 0, ...) 传的是 NULL 指针） */
+        if(ftruncate(ctx->db_fd,0)!=0) perror("aof_rewrite ftruncate");
         lseek(ctx->db_fd,0,SEEK_SET);
+        ctx->size=0;
+        ctx->current_count=0;
+        aof_st_write(ctx);
         return;
-
     }
-    //printf("触发重写！当前引擎里的 key 数量为: %d\n", ctx->current_count);
-    char **key=(char **)kv_malloc(ctx->current_count*sizeof(char*));
-    char **value=(char **)kv_malloc(ctx->current_count*sizeof(char *));
-    uint32_t *value_len=(uint32_t *)kv_malloc(ctx->current_count*sizeof(uint32_t));
+
+    char **key=(char **)kv_malloc(count*sizeof(char*));
+    char **value=(char **)kv_malloc(count*sizeof(char*));
+    uint32_t *value_len=(uint32_t *)kv_malloc(count*sizeof(uint32_t));
+    if(!key||!value||!value_len){
+        kv_free(key); kv_free(value); kv_free(value_len);
+        return;
+    }
+    memset(key,0,count*sizeof(char*));
+    memset(value,0,count*sizeof(char*));
+    memset(value_len,0,count*sizeof(uint32_t));
 
     kv_tra(key,value,value_len);
-    char *op="SET";
-    ftruncate(ctx->db_fd,0);
+
+    if(ftruncate(ctx->db_fd,0)!=0) perror("aof_rewrite ftruncate");
     lseek(ctx->db_fd,0,SEEK_SET);
 
-    int offset=0;
-    for(int i=0;i<ctx->current_count;i++){
-        int length=strlen(op)+1+strlen(key[i])+1+value_len[i];
+    char *op="SET";
+    int op_len=strlen(op)+1;
+    off_t offset=0;
+    int written=0;
+
+    for(int i=0;i<count;i++){
+        if(!key[i]||!value[i]) continue;   /* 引擎遍历可能留下空洞，跳过 */
+        int key_len=strlen(key[i])+1;
+        int length=op_len+key_len+(int)value_len[i];
         struct iovec iov[4];
-        int iovcnt = 0;
-        iov [ iovcnt ].iov_base = &length;
-        iov [ iovcnt ].iov_len = sizeof(int);
-        iovcnt++;
-        
-        iov [ iovcnt ].iov_base = op;
-        iov [ iovcnt ].iov_len = strlen(op) + 1;
+        int iovcnt=0;
+
+        iov[iovcnt].iov_base=&length;
+        iov[iovcnt].iov_len=sizeof(int);
         iovcnt++;
 
-        iov [ iovcnt ].iov_base = key[i];
-        iov [ iovcnt ].iov_len = strlen(key[i]) + 1;
+        iov[iovcnt].iov_base=op;
+        iov[iovcnt].iov_len=op_len;
         iovcnt++;
 
-        
-        iov [ iovcnt ].iov_base = value[i];
-        iov [ iovcnt ].iov_len = value_len[i];
+        iov[iovcnt].iov_base=key[i];
+        iov[iovcnt].iov_len=key_len;
         iovcnt++;
-        int n=writev(ctx->db_fd,iov,iovcnt);
+
+        iov[iovcnt].iov_base=value[i];
+        iov[iovcnt].iov_len=value_len[i];
+        iovcnt++;
+
+        int n=writev_full(ctx->db_fd,iov,iovcnt);
+        if(n<0){
+            perror("aof_rewrite writev");
+            break;
+        }
         offset+=n;
-        // int n=write_full(ctx->db_fd,&length,sizeof(int));
-        // offset+=n;
-        // n=write_full(ctx->db_fd,op,strlen(op)+1);
-        // offset+=n;
-        // n=write_full(ctx->db_fd,key[i],strlen(key[i])+1);
-        // offset+=n;
-        // n=write_full(ctx->db_fd,value[i],value_len[i]);
-        // offset+=n;
-
+        written++;
     }
+
     ctx->size=offset;
-    lseek(ctx->st_fd, 0, SEEK_SET);
-    write(ctx->st_fd, &ctx->size, sizeof(int));
-    write(ctx->st_fd, &ctx->current_count, sizeof(int));
+    ctx->current_count=written;
+    aof_st_write(ctx);
+
     kv_free(key);
     kv_free(value);
     kv_free(value_len);
@@ -130,13 +216,20 @@ int aof_append(AOFcontext_ctx* ctx,char *op,char *key,char *value,uint32_t value
     if(!ctx||!op||!key){
         return -1;
     }
-    if(ctx->current_count>MAX_COUNT){//进来先判断要不要重写旧数据
-        aof_rewrite(ctx);
+    /* 重写策略：命令数超过阈值，且超过活 key 数的 2 倍才重写。
+       否则 key 数 >100 时，current_count 被重写成 key 数，会变成每条命令都全库重写 */
+    if(ctx->current_count>MAX_COUNT){
+        int live=kv_count();
+        if(live<=0||ctx->current_count>live*2){
+            aof_rewrite(ctx);
+        }
     }
     int offset = 0;
     int op_len = strlen(op) + 1;
     int key_len = strlen(key) + 1;
-    int length = op_len + key_len + value_len;
+    int64_t length64 = (int64_t)op_len + key_len + (int64_t)value_len;
+    if(length64 > 2147483647LL) return -1;   /* 单条记录长度溢出 */
+    int length = (int)length64;
     if((length+sizeof(int))<(4096 - (*huge_len))){
         memcpy(huge_buf+(*huge_len),&length,sizeof(int));
         offset+=sizeof(int);
@@ -152,8 +245,14 @@ int aof_append(AOFcontext_ctx* ctx,char *op,char *key,char *value,uint32_t value
         (*huge_len)+=offset;
         return 0;
     }
-    int n = write_full(ctx->db_fd,huge_buf,(*huge_len));//先写旧数据
-    ctx->size+=n;
+    if(*huge_len>0){
+        int n=write_full(ctx->db_fd,huge_buf,(*huge_len));//先写旧数据
+        if(n!=*huge_len){
+            perror("aof_append flush");
+            return -1;
+        }
+        ctx->size+=n;
+    }
     struct iovec iov[4];
     int iovcnt = 0;
     iov [ iovcnt ].iov_base = &length;
@@ -173,16 +272,19 @@ int aof_append(AOFcontext_ctx* ctx,char *op,char *key,char *value,uint32_t value
         iov [ iovcnt ].iov_len = value_len;
         iovcnt++;
     }
-    n=writev(ctx->db_fd,iov,iovcnt);
+    int n=writev_full(ctx->db_fd,iov,iovcnt);
+    if(n<0){
+        perror("aof_append writev");
+        return -1;
+    }
     ctx->size+=n;
 
     (*huge_len)= 0;
     ctx->current_count+=((*current_num)+1);
     (*current_num)=0;
-    
-    lseek(ctx->st_fd,0,SEEK_SET);
-    write(ctx->st_fd,&ctx->size,sizeof(int));
-    write(ctx->st_fd,&ctx->current_count,sizeof(int));
+
+    aof_st_write(ctx);
+    return 0;
 
     // int  total_write=strlen(op)+1+strlen(key)+1+value_len;
     // struct iovec iov[4];
@@ -261,35 +363,60 @@ static void kv_aof_execute(char *op,char *key,uint8_t *value,uint32_t value_len)
 }
 int aof_recover(AOFcontext_ctx* ctx){
     if(!ctx||ctx->db_fd<0) return ERROR;
-    int total_size=0;
-    if(ctx->size==0) return OK;
-    while(total_size<ctx->size){
+
+    if(lseek(ctx->db_fd,0,SEEK_SET)<0) return ERROR;
+    ctx->size=0;
+    ctx->current_count=0;
+
+    for(;;){
         int length=0;
-        int n=read_full(ctx->db_fd,&length,sizeof(int));
-        
-        total_size+=n;
+        int n=read_full(ctx->db_fd,(char*)&length,sizeof(int));
+        if(n==0) break;                     /* 正常读完 */
+        if(n!=(int)sizeof(int)) break;      /* 尾部残缺的包头：丢掉 */
+        if(length<=0||(uint32_t)length>AOF_MAX_RECORD){
+            fprintf(stderr,"aof_recover: bad record length %d, stop\n",length);
+            break;
+        }
 
         char *pkt=(char *)kv_malloc(length);
+        if(!pkt) break;
         n=read_full(ctx->db_fd,pkt,length);
-        if (n != length) {
+        if(n!=length){                      /* 尾包没写完：丢掉 */
             kv_free(pkt);
-            return ERROR; // 读不到完整的包，说明文件损坏或状态对不上
+            break;
         }
+
         int offset=0;
-        int op_len=strnlen(pkt+offset,length-offset)+1;
+        int rem=length-offset;
+        int op_len=strnlen(pkt+offset,rem);
+        if(op_len>=rem){ kv_free(pkt); break; }
+        op_len+=1;
         char *op=pkt+offset;
         offset+=op_len;
-        int key_len=strnlen(pkt+offset,length-offset)+1;
+
+        rem=length-offset;
+        int key_len=strnlen(pkt+offset,rem);
+        if(key_len>=rem){ kv_free(pkt); break; }
+        key_len+=1;
         char *key=pkt+offset;
         offset+=key_len;
 
-        uint8_t *value=pkt+offset;
-        uint32_t value_len=length-offset;
-        offset+=value_len;
+        uint8_t *value=(uint8_t*)pkt+offset;
+        uint32_t value_len=(uint32_t)(length-offset);
+
         kv_aof_execute(op,key,value,value_len);
-        total_size+=offset;
+
+        ctx->size += (off_t)(sizeof(int)+length);
+        ctx->current_count++;
         kv_free(pkt);
     }
+
+    /* 尾部有残缺记录：把文件截断到已恢复位置，避免下次又读到 */
+    if(lseek(ctx->db_fd,0,SEEK_END)!=ctx->size){
+        if(ftruncate(ctx->db_fd,ctx->size)==0) lseek(ctx->db_fd,0,SEEK_END);
+    }
+    lseek(ctx->db_fd,0,SEEK_END);
+    aof_st_write(ctx);
     return OK;
 }
 void aof_close(AOFcontext_ctx* ctx){
@@ -304,21 +431,21 @@ void aof_close(AOFcontext_ctx* ctx){
     kv_free(ctx);
 }
 void force_flush(AOFcontext_ctx *ctx, char *huge_buf, int *huge_len, int *current_num) {
-    if(*huge_len==0) return;
-    if (*huge_len > 0) {
-        int n = write(ctx->db_fd, huge_buf, *huge_len);
-        ctx->size += n;
-        ctx->current_count += *current_num;
-        
-        // 同步状态文件
-        lseek(ctx->st_fd, 0, SEEK_SET);
-        write(ctx->st_fd, &ctx->size, sizeof(int));
-        write(ctx->st_fd, &ctx->current_count, sizeof(int));
-        
-        // 重置缓冲区
-        *huge_len = 0;
-        *current_num = 0;
+    if(!ctx||!huge_buf||!huge_len||!current_num) return;
+    if(*huge_len<=0) return;
+
+    int n=write_full(ctx->db_fd,huge_buf,*huge_len);
+    if(n!=*huge_len){
+        perror("force_flush");
+        return;
     }
+    ctx->size+=n;
+    ctx->current_count+=*current_num;
+
+    aof_st_write(ctx);
+
+    *huge_len=0;
+    *current_num=0;
 }
 
 

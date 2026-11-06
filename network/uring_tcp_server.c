@@ -10,6 +10,8 @@
 #include"kvstore.h"
 #include"log.h"
 #include"tool.h"
+#include"upload.h"
+#include"resp.h"
 /******* */
 #if AOF
 #include"aof.h"
@@ -177,12 +179,22 @@ int recv_cb(struct io_uring_cqe *entries,int fd){
         #if ENABLEKV
         int cons_=0;
         connection[fd].rlength+=ret;
-        KV_server(connection[fd].rbuffer,connection[fd].rlength,connection[fd].wbuffer,
-        BUFFER_SIZE,&cons_,&connection[fd].wlength);
+        if(KV_server(fd,connection[fd].rbuffer,connection[fd].rlength,connection[fd].wbuffer,
+        BUFFER_SIZE,&cons_,&connection[fd].wlength)<0){
+            kv_upload_abort(fd);
+            set_event_cancel(&ring,fd,EVENT_CANCEL);
+            close(fd);
+            memset(&connection[fd],0,sizeof(struct conn));
+            return 0;
+        }
         if(cons_<connection[fd].rlength){
             memmove(connection[fd].rbuffer,connection[fd].rbuffer+cons_,connection[fd].rlength-cons_);
         }
         connection[fd].rlength-=cons_;
+        if(connection[fd].wlength==0&&kv_resp_pending(fd)){
+            int n=kv_resp_next(fd,(uint8_t*)connection[fd].wbuffer,BUFFER_SIZE);
+            if(n>0) connection[fd].wlength=n;
+        }
         if(connection[fd].wlength>0){
             set_event_send(&ring,fd,connection[fd].wbuffer,connection[fd].wlength,0,EVENT_SEND);
         }else{
@@ -196,6 +208,8 @@ int recv_cb(struct io_uring_cqe *entries,int fd){
         printf("fd ->%d is disconnected\n",fd);
         printf("rlength=%d\n",connection[fd].rlength);
         set_event_cancel(&ring,fd,EVENT_CANCEL);
+        kv_upload_abort(fd);
+        kv_resp_abort(fd);
         close(fd);
         memset(&connection[fd],0,sizeof(struct conn));
         return 0;
@@ -204,20 +218,59 @@ int recv_cb(struct io_uring_cqe *entries,int fd){
 int send_cb(struct io_uring_cqe*entries,int fd){
     int set=entries->res;
     if (entries->res == -ECANCELED) return 0;
-    if(set>0){
-        INFO("server send to clientd:( %s)   %d(bytes)\n",connection[fd].wbuffer,set);
-        connection[fd].wlength-=set;
-        INFO("wbuffer中还有多少数据：%d\n",connection[fd].wlength);
-        set_event_recv(&ring,fd,connection[fd].rbuffer+connection[fd].rlength,BUFFER_SIZE-connection[fd].rlength,0,EVENT_RECV);
-        return 0;
-    }else{
+    if(set<=0){
         printf("fd ->%d is disconnected\n",fd);
         printf("rlength=%d\n",connection[fd].rlength);
         set_event_cancel(&ring,fd,EVENT_CANCEL);
+        kv_upload_abort(fd);
+        kv_resp_abort(fd);
         close(fd);
         memset(&connection[fd],0,sizeof(struct conn)); 
         return 0;
     }
+
+    connection[fd].wlength-=set;
+    if(connection[fd].wlength>0){                 /* 本段没发完：挪走已发部分继续 */
+        memmove(connection[fd].wbuffer,connection[fd].wbuffer+set,connection[fd].wlength);
+        set_event_send(&ring,fd,connection[fd].wbuffer,connection[fd].wlength,0,EVENT_SEND);
+        return 0;
+    }
+
+    if(kv_resp_pending(fd)){
+        int n=kv_resp_next(fd,(uint8_t*)connection[fd].wbuffer,BUFFER_SIZE);
+        if(n>0){
+            connection[fd].wlength=n;
+            set_event_send(&ring,fd,connection[fd].wbuffer,n,0,EVENT_SEND);
+            return 0;
+        }
+    }
+
+    /* 队列空：处理 rbuffer 里残留的请求 */
+    if(connection[fd].rlength>0){
+        int cons_=0;
+        if(KV_server(fd,connection[fd].rbuffer,connection[fd].rlength,
+                     connection[fd].wbuffer,BUFFER_SIZE,&cons_,&connection[fd].wlength)<0){
+            set_event_cancel(&ring,fd,EVENT_CANCEL);
+            kv_upload_abort(fd);
+            kv_resp_abort(fd);
+            close(fd);
+            memset(&connection[fd],0,sizeof(struct conn));
+            return 0;
+        }
+        if(cons_<connection[fd].rlength){
+            memmove(connection[fd].rbuffer,connection[fd].rbuffer+cons_,
+                    connection[fd].rlength-cons_);
+        }
+        connection[fd].rlength-=cons_;
+        if(connection[fd].wlength>0){
+            set_event_send(&ring,fd,connection[fd].wbuffer,connection[fd].wlength,0,EVENT_SEND);
+            return 0;
+        }
+    }
+
+    set_event_recv(&ring,fd,connection[fd].rbuffer+connection[fd].rlength,
+                   BUFFER_SIZE-connection[fd].rlength,0,EVENT_RECV);
+    return 0;
 }
 int accept_cb(struct io_uring_cqe*entries,int fd){
     struct sockaddr_in addr;
@@ -304,6 +357,8 @@ int recv_from_server_cb(struct io_uring_cqe*entries,int fd){
         printf("fd ->%d is disconnected\n",fd);
         printf("rlength=%d\n",connection[fd].rlength);
         set_event_cancel(&ring,fd,EVENT_CANCEL);
+        kv_upload_abort(fd);
+        kv_resp_abort(fd);
         close(fd);
         
         memset(&connection[fd],0,sizeof(struct conn));
@@ -323,6 +378,8 @@ int recv_from_slave_cb(struct io_uring_cqe *entries,int fd){
         printf("rlength=%d\n",connection[fd].rlength);
         set_event_cancel(&ring,fd,EVENT_CANCEL);
         slave_close(mgr,fd);
+        kv_upload_abort(fd);
+        kv_resp_abort(fd);
         close(fd);
         memset(&connection[fd],0,sizeof(struct conn));
         return 0;

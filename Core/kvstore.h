@@ -3,7 +3,7 @@
 #define ENABLE_REACTOR 0
 #define ENABLE_PROACTOR 1
 #define ENABLE_NTYCO 2
-#define NETWORK_SELECT ENABLE_NTYCO//控制启用哪一个网络框架
+#define NETWORK_SELECT ENABLE_REACTOR//控制启用哪一个网络框架
 #define ENGINE_ARRAY 0
 #define ENGINE_HASH 1
 #define ENGINE_RBTREE 2
@@ -34,15 +34,20 @@
 #include<string.h>
 #include<assert.h>
 #define KV_MAX_TOKENS 8  
+/* 单连接待发响应总字节上限，防止批量 GET 大 value 叠加把内存吃光 */
+#define KV_RESP_MAX_BYTES (64u*1024u*1024u)
+
 typedef struct info{
     uint8_t **res;
     uint32_t *res_len;
     int num;
     int cons_;
     int status;
+    uint32_t pending_bytes;   /* 本次请求已产出的响应字节数（内存闸门用） */
 }kvstore_t;
 
-void KV_server(char *rbuffer,int rlength,char *wbuffer,int wlength,int *cons,int *send);
+/* 返回 0 正常（可能只消费部分字节表示半包）；返回 -1 表示坏包，调用方应断开连接 */
+int KV_server(int fd,char *rbuffer,int rlength,char *wbuffer,int wlength,int *cons,int *send);
 
 extern int uring_start(char *ip,unsigned int port);
 extern int reactor_entry(char *ip,unsigned int port);

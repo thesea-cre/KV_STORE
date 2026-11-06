@@ -7,7 +7,7 @@
 #include "list.h"
 #define UCONTEXT 0
 #ifndef INFO
-#define INFO
+#define INFO 
 #endif
 // ========== 配置宏 ==========
 #define STACK_SIZE (16*1024)    // 协程栈大小，当前1KB极易栈溢出，建议至少改为16384(16KB)

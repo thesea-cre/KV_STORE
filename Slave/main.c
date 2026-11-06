@@ -6,6 +6,8 @@
 #include"adapt.h"
 #include"kvproto.h"
 #include"tool.h"
+#include"upload.h"
+#include"resp.h"
 
 #if AOF
 #include"aof.h"
@@ -50,6 +52,11 @@ int main(int argc, char *argv[]) {
     ctx=aof_init("db_1","st_1");
     #endif
     #if SYNC
+    mgr=(MasterMgr*)kv_malloc(sizeof(MasterMgr));
+    if(!mgr){
+        fprintf(stderr,"mgr malloc failed\n");
+        return -1;
+    }
     master_init(mgr);
     #endif
     /* 3. 解析命令行 */
@@ -63,6 +70,8 @@ int main(int argc, char *argv[]) {
 
     /* 4. 引擎初始化 + AOF 恢复 */
     init_kvengine();
+    kv_upload_init();   /* 大 value 分片上传上下文 */
+    kv_resp_init();     /* 待发响应队列 */
     #if AOF
     aof_recover(ctx);
     #endif
@@ -86,6 +95,8 @@ int main(int argc, char *argv[]) {
     #if SYNC
     master_destory(mgr);
     #endif
+    kv_upload_abort_all();
+    kv_resp_abort_all();
     dest_kvengine();
     return 0;
 }

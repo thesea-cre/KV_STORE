@@ -2,6 +2,7 @@
 #include"kv_array.h"
 #include"kv_hash.h"
 #include"kv_rbtree.h"
+#include"kv_skiplist.h"
 #include"kvstore.h"
 #include<pthread.h>
 kv_array_t global_array;

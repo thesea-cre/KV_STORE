@@ -298,6 +298,7 @@ void KV_encode(uint8_t *buf,uint32_t buf_len,RES *res){
 
     switch(head.opcode){
         case KV_CMD_SET:
+        case KV_CMD_SET_CHUNK://大包分片：编码格式与 SET 相同
         case KV_CMD_MOD:
             if(!res->key||!res->value||!res->value_len){
                 res->status=ERROR;

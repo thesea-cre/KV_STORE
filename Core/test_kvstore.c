@@ -56,7 +56,7 @@ static void run_command(const char *op, uint8_t **keys, uint8_t **values, uint32
     // 2. 核心层处理
     int w_len = 0;
     int r_len = 0;
-    KV_server(rbuf, in.cons_, wbuf, sizeof(wbuf), &r_len, &w_len);
+    KV_server(-1, rbuf, in.cons_, wbuf, sizeof(wbuf), &r_len, &w_len);
 
     // 【新增】如果是测试半包，这里可能不返回OK，直接在这里判断
     if (expected_cons_status == WAIT) {
@@ -218,14 +218,14 @@ static void test_tcp_fragment(){
     int cons = 0, send = 0;
     
     // 1. 测试粘包：一次传入两个完整的包
-    KV_server(rbuf, total_pkt_len, wbuf, sizeof(wbuf), &cons, &send);
+    KV_server(-1, rbuf, total_pkt_len, wbuf, sizeof(wbuf), &cons, &send);
     CHECK(cons == total_pkt_len); // 应该消费了两个包的长度
     CHECK(send > 0);              // 应该返回了两个包的响应
     CHECK(strcmp(wbuf + send-8, "EXIST\r\n") == 0); // 粗略检查第二个响应（偏移量需要具体算，这里略过具体偏移）
 
     // 2. 测试半包：传入一半
     memset(wbuf, 0, sizeof(wbuf));
-    KV_server(rbuf, one_pkt_len / 2, wbuf, sizeof(wbuf), &cons, &send);
+    KV_server(-1, rbuf, one_pkt_len / 2, wbuf, sizeof(wbuf), &cons, &send);
     CHECK(cons == 0); // 半包不消耗数据
     CHECK(send == 0); // 半包不产生数据
 

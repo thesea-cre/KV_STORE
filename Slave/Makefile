@@ -36,6 +36,9 @@
 # run: $(TARGET)
 # 	./$(TARGET)
 SRCS:= ../Core/kvstore.c  ../protocol/kvproto.c ../Tool/tool.c ../mempool/mempool.c \
+		../Tool/queue.c \
+		../Core/upload.c \
+		../Core/resp.c \
 		../AL/adapt.c ../engine/kv_array.c ../engine/kv_hash.c ../engine/kv_rbtree.c \
 		../network/nytco/rbtree.c \
 		../network/reactor.c \

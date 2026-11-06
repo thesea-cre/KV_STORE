@@ -6,6 +6,8 @@
 #include"adapt.h"
 #include"kvproto.h"
 #include"tool.h"
+#include"upload.h"
+#include"resp.h"
 #if LOG
 #include"log.h"
 #endif
@@ -42,26 +44,22 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    /* 1. 内存池 */
-#if 0
-    mempool = Managerpool_GetInstance();
-#endif
 
-    /* 2. AOF 文件初始化 */
     #if AOF
     ctx=aof_init("db_1","st_1");
     #endif
+
     #if SYNC
     printf("master_init\n");
     mgr=(MasterMgr* )kv_malloc(sizeof(MasterMgr));
     master_init(mgr);
-    
     #endif
+
     #if LOG
     log_init("server.log", LOG_INFO); 
     LOG_INFO("服务端启动成功，监听端口: %d", 2000);
     #endif
-    /* 3. 解析命令行 */
+
     unsigned int port = (unsigned int)atoi(argv[2]);
 
         if      (strcmp(argv[3], "master") == 0) s_or_c = 0;
@@ -72,10 +70,12 @@ int main(int argc, char *argv[]) {
 
     /* 4. 引擎初始化 + AOF 恢复 */
     init_kvengine();
+    kv_upload_init();   
+    kv_resp_init();     
     #if AOF
     aof_recover(ctx);
     #endif
-    /* 5. 复制模块初始化（★ 老版本缺的就是这一步） */
+
     printf("[main] 角色 = 单机, port=%u\n", port);
 
     /* 6. 网络层入口 */
@@ -87,7 +87,6 @@ int main(int argc, char *argv[]) {
     nytco(ip,port);
 #endif
 
-    /* 7. 收尾（网络层返回说明已退出） */
     
     #if AOF
     aof_close(ctx);
@@ -95,6 +94,8 @@ int main(int argc, char *argv[]) {
     #if SYNC
     master_destory(mgr);
     #endif
+    kv_upload_abort_all();
+    kv_resp_abort_all();
     dest_kvengine();
     log_close();
     return 0;

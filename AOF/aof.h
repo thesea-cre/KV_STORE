@@ -9,11 +9,20 @@
 #include<stddef.h>
 #include<pthread.h>
 #include<stdint.h>
+#include<sys/types.h>
+
+/* 单条记录上限：防止损坏的长度字段触发超大 malloc */
+#define AOF_MAX_RECORD (128u*1024u*1024u)
+
+/* st 状态文件：magic(4) + version(4) + size(8) + count(4) = 20 字节 */
+#define AOF_ST_MAGIC   0x414F4653u   /* "AOFS" */
+#define AOF_ST_VERSION 1u
+#define AOF_ST_LEN     20
 
 typedef struct{
     int db_fd;
     int st_fd;
-    int size;//aof文件大小
+    off_t size;//aof文件大小（64 位，支持 >2GB）
     int current_count;//命令的个数
 }AOFcontext_ctx;
 typedef struct{

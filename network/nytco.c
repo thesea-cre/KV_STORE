@@ -5,13 +5,16 @@
 #include <arpa/inet.h>
 #include"kvstore.h"
 #include "coroutine.h" // 你的协程库头文件
-#include<sys/time.h>
+#include <sys/time.h>
+#include<sys/sendfile.h>
 #include"tool.h"
+#include"upload.h"
+#include"resp.h"
 /******* */
 #if AOF
 #include"aof.h"
 extern AOFcontext_ctx* ctx;
-extern char* huge_buf;
+extern char huge_buf[];
 extern int huge_buf_len;
 extern int huge_num;
 #endif
@@ -58,10 +61,20 @@ int nytco_init_port(char *ip,unsigned int port){
     }else{
         create_cor(tls_sched,socketfd, accept_worker, p_listen_fd);//为每个fd创建一个协程
     }
+    #else
+    create_cor(tls_sched,socketfd, accept_worker, p_listen_fd);//为每个fd创建一个协程
     #endif
-    //create_cor(tls_sched,socketfd, accept_worker, p_listen_fd);//为每个fd创建一个协程
     INFO("exit create_cor\n");
     return socketfd;
+}
+static int co_send_all(int fd,char *buf,int len){
+    int off=0;
+    while(off<len){
+        int set=co_send(fd,buf+off,len-off,0);
+        if(set<=0) return -1;
+        off+=set;
+    }
+    return 0;
 }
 void client_handler(void *arg){
     int fd = *(int*)arg;
@@ -70,27 +83,35 @@ void client_handler(void *arg){
     int wlength=0;
     char rbuffer[BUF_SIZE]={0};
     int rlength=0;
-    char res_buf[BUF_SIZE]={0};
+    int need_read=1;   /* 只有"没有可处理数据"或"半包"时才继续读 */
     while (1) {
-        // 调用Hook后的recv，阻塞时自动让出CPU
-        int ret = co_recv(fd, rbuffer+rlength, BUF_SIZE-rlength, 0);
-        if (ret <= 0) {
-            goto close_conn;
+        int ret;
+        if (need_read) {
+            if (rlength >= BUF_SIZE) goto close_conn;   /* 缓冲区满了还凑不出一帧：协议异常 */
+            ret = co_recv(fd, rbuffer+rlength, BUF_SIZE-rlength, 0);
+            if (ret <= 0) goto close_conn;
+            rlength += ret;
         }
+
         #if KV_COMPLEX
             int cons_=0;
-            rlength+=ret;
-            KV_server(rbuffer,rlength,wbuffer,BUF_SIZE,&cons_,&wlength);
+            if(KV_server(fd,rbuffer,rlength,wbuffer,BUF_SIZE,&cons_,&wlength)<0){
+                goto close_conn;   /* 坏包：断开连接 */
+            }
             if(cons_<rlength){
                 memmove(rbuffer,rbuffer+cons_,rlength-cons_);
             }
             rlength-=cons_;
-            if(wlength>0){
-                int set=co_send(fd,wbuffer,wlength,0);
-                INFO("server send to clientd:( %s)   %d(bytes)\n",wbuffer,set);
-                wlength-=set;
-                INFO("wbuffer中还有多少数据：%d\n",wlength);
+            if(wlength>0 && co_send_all(fd,wbuffer,wlength)<0) goto close_conn;
+            wlength=0;
+            /* 响应队列还有分片：继续拉、继续发 */
+            while(kv_resp_pending(fd)){
+                int n=kv_resp_next(fd,(uint8_t*)wbuffer,BUF_SIZE);
+                if(n<=0) break;
+                if(co_send_all(fd,wbuffer,n)<0) goto close_conn;
             }
+            /* 处理了整帧且还有残留 → 下一轮直接处理；否则去读 */
+            need_read = (rlength==0 || cons_==0);
         #elif 
             INFO("recv %d (bytes)\n",ret);
             INFO("data: %s\n",rbuffer);
@@ -99,6 +120,8 @@ void client_handler(void *arg){
         #endif
     }
 close_conn:
+    kv_upload_abort(fd);
+    kv_resp_abort(fd);
     close(fd);
 }
 #if SYNC
@@ -124,38 +147,37 @@ close_conn:
 }
 
 
-void master_handler(void *arg){//主节点调用
+void master_handler(void *arg){//从节点侧：接收主节点发来的复制流
     int fd = *(int*)arg;
     free(arg);
     char rbuffer[BUF_SIZE]={0};
     int rlength=0;
-    //阶段一：握手，等从节点的PSYNC（心跳未实现，从节点之后不会再发数据）
     while (1) {
         int ret = co_recv(fd, rbuffer+rlength, BUF_SIZE-rlength, 0);
         if (ret <= 0) {
             goto close_conn;
         }
-        INFO("recv from slave %d (bytes)\n",ret);
         int cons_=0;
         int status=0;
         rlength+=ret;
         KV_sync(rbuffer,rlength,NULL,0,&cons_,&status);
-        if(status==1){
+        if(cons_>0){
             memmove(rbuffer,rbuffer+cons_,rlength-cons_);
         }
         rlength-=cons_;
-        return 0;
+        if(status==2){   /* 记录格式损坏：断开重连 */
+            goto close_conn;
+        }
     }
 close_conn:
+    KV_sync_reset();
+    kv_upload_abort(fd);
+    kv_resp_abort(fd);
     close(fd);
 }
 void accept_slave_worker(void* arg){
     int listen_fd = *(int*)arg;
     free(arg);
-    char wbuffer[BUF_SIZE]={0};
-    int wlength=0;
-    char rbuffer[BUF_SIZE]={0};
-    int rlength=0;
     struct sockaddr_in client_addr;
     socklen_t len = sizeof(client_addr);
     while (1) {
@@ -168,8 +190,10 @@ void accept_slave_worker(void* arg){
         
         force_flush(ctx,huge_buf,&huge_buf_len,&huge_num);
         aof_rewrite(ctx);
-        off_t offset=0;
-        sendfile(conn_fd,ctx->db_fd,&offset,ctx->size);//同步阻塞发送
+        if(sync_send_file(conn_fd,ctx->db_fd,ctx->size)!=0){
+            close(conn_fd);   /* 全量同步失败：断开，等从节点重连 */
+            continue;
+        }
 
 
         int* pfd = malloc(sizeof(int));
@@ -185,12 +209,6 @@ void accept_slave_worker(void* arg){
         }
         mgr->slave_head->next=slave;
         mgr->slave_count++;
-        slave->rbuffer=rbuffer;
-        slave->wbuffer=wbuffer;
-        slave->rlength=&rlength;
-        slave->wlength=&wlength;
-        slave->buf_length=BUFFER_SIZE;
-        return;
     }
 }
 #endif

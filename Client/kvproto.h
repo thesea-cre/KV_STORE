@@ -40,6 +40,7 @@ extern const char *command[];
 #define TYPE_IMGINE 0x02
 #define TYPE_URL 0x03
 #define TYPE_ELSE 0x04
+#define TYPE_CHUNK  0x05   /* 分片传输：value = [total u32][offset u32][data] */
 
 enum{
     KV_TYPE_START,
@@ -103,6 +104,8 @@ typedef struct RES_s{
 //编码是深拷贝进去的，key,value,除了op,type是浅拷贝
 //所以上层也是回应的是type+value类型，然而编码函数
 void KV_encode(uint8_t *buf,uint32_t buf_len,RES *res);
+/* 头部编解码（main.c 收包时需要先解出 length） */
+int  kv_header_decode(kv_header_t *header,const uint8_t *buf,uint32_t buf_len);
 //解码函数，上层只需记得free
 //key,value是经过深拷贝的，但是op和type_res只是浅拷贝
 //解码函数将value改为了type+value直接交给引擎层存

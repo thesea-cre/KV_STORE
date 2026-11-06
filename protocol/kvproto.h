@@ -3,8 +3,9 @@
 #include<stdint.h>
 #include<stddef.h>
 #define HEAD_LEN 9 //固定头部长度
+#define KV_FRAME_MAX 1024 //单帧最大长度，必须 <= 网络层接收缓冲区 BUFFER_SIZE
 #define TLV_LEN_MIN 11  //1+4+1+4+1 最小tlv长度
-#define PACKAGE_LEN_MIN HEAD_LEN+TLV_LEN_MIN //最小包长
+#define PACKAGE_LEN_MIN HEAD_LEN+TLV_LEN_MIN //最小帧长
 #define KEY_VLAUE_NUM_MAX 10 //同构批处理最大命令数
 #define DATA_LEN_MAX 100*1024 //值最大限度
 
@@ -33,13 +34,14 @@ enum{
     KV_CMD_COUNT,
     KV_CMD_OTHER=KV_CMD_COUNT
 };
-extern const char *command[];
+
 
 
 #define TYPE_STRING 0x01
 #define TYPE_IMGINE 0x02
 #define TYPE_URL 0x03
 #define TYPE_ELSE 0x04
+#define TYPE_CHUNK  0x05   /* 分片传输：value = [total u32][offset u32][data] */
 
 enum{
     KV_TYPE_START,
@@ -49,24 +51,25 @@ enum{
     KV_TYPE_COUNT,
     KV_TYPE_ELSE=KV_TYPE_COUNT
 };
-extern const char* type_[];
 
+extern const char *command[];
+extern const char* type_[];
 extern const char *response[];
 
 
 
 
 
-typedef struct kv_header_s{//定义的协议头
+typedef struct kv_header_s{//定义的帧头
     uint16_t magic;//
     uint8_t version;//
     uint16_t opcode;//操作码部分先就这样
-    uint32_t length;//数据部分长度
+    uint32_t length;//命令长度
     // uint16_t frag_number;    
     // uint32_t total_length;
 }kv_header_t;//2+1+2+4=9
 
-typedef struct kv_tlv_s{
+typedef struct kv_tlv_s{定义的命令格式
     uint8_t type;//数据类型
     uint32_t key_length;//数据长度
     uint8_t *key;//数据部分
@@ -76,12 +79,14 @@ typedef struct kv_tlv_s{
 
 
 
-
+//解析存解析的命令
 typedef struct kv_payload_s{
     kv_tlv_t *array;
     uint32_t num;
 }kv_payload_t;
 
+//支持批处理，所以一个帧可以有多个命令，可以存命令的数目不确定，只要不超过最大帧就可以
+//这个结构体字段就表示一个帧里面能解析出的东西
 typedef struct RES_s{
     char *op;
     uint32_t num;
@@ -93,6 +98,7 @@ typedef struct RES_s{
     uint8_t error_info[128];
     uint32_t cons_;
 }RES;
+
 #define ERROR -2
 #define OK 1
 #define WAIT -1
@@ -113,3 +119,5 @@ void kv_RES_t_create(RES* res,char *op,char **key,char **value,char **type,int *
 
 
 #endif
+//1.头部简单协议认证
+//2.帧合法验证，只最大帧验证，没有做最小帧合法判断

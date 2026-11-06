@@ -10,6 +10,8 @@
 #include<sys/time.h>
 #include"kvstore.h"
 #include"tool.h"
+#include"upload.h"
+#include"resp.h"
 #if AOF
 #include"aof.h"
 extern AOFcontext_ctx* ctx;
@@ -241,12 +243,16 @@ int recv_cb(int fd){//处理粘包，分包
         perror("recv");
         cancel_event(fd);
         memset(&connection[fd],0,sizeof(struct conn));
+        kv_upload_abort(fd);
+        kv_resp_abort(fd);
         close(fd);
         return -1;
     }else if(ret == 0){
         INFO("fd: %d is diconnected\n",fd);
         cancel_event(fd);
         memset(&connection[fd],0,sizeof(struct conn));
+        kv_upload_abort(fd);
+        kv_resp_abort(fd);
         close(fd);
         return 0;
     }else{
@@ -255,13 +261,23 @@ int recv_cb(int fd){//处理粘包，分包
         connection[fd].rlength+=ret;
         INFO("接受了%d bytes\n",ret);
         INFO("rlength=%d bytes \n",connection[fd].rlength);
-        KV_server(connection[fd].rbuffer,connection[fd].rlength,connection[fd].wbuffer,
-        BUFFER_SIZE,&cons_,&connection[fd].wlength);
+        if(KV_server(fd,connection[fd].rbuffer,connection[fd].rlength,connection[fd].wbuffer,
+        BUFFER_SIZE,&cons_,&connection[fd].wlength)<0){
+            kv_upload_abort(fd);
+            cancel_event(fd);
+            memset(&connection[fd],0,sizeof(struct conn));
+            close(fd);
+            return -1;
+        }
         if(cons_<connection[fd].rlength){
             memmove(connection[fd].rbuffer,connection[fd].rbuffer+cons_,connection[fd].rlength-cons_);
         }
         INFO("这次处理了%d bytes\n",cons_);
         connection[fd].rlength-=cons_;
+        if(connection[fd].wlength==0&&kv_resp_pending(fd)){
+            int n=kv_resp_next(fd,(uint8_t*)connection[fd].wbuffer,BUFFER_SIZE);
+            if(n>0) connection[fd].wlength=n;
+        }
         if(connection[fd].wlength>0){
             set_event(fd,EPOLLOUT);
         }else{
@@ -279,30 +295,65 @@ int send_cb(int fd){
     memcpy(connection[fd].wbuffer,connection[fd].rbuffer,connection[fd].rlength);
     connection[fd].wlength=connection[fd].rlength;
     #endif
-    int set;//阻塞式的肯定能发完
-    set= send(fd,connection[fd].wbuffer,connection[fd].wlength,0);
-    //hex_dump(connection[fd].wbuffer,set,"服务端发\n");
+    int set = send(fd,connection[fd].wbuffer,connection[fd].wlength,0);
     if(set<0){
         perror("send");
         cancel_event(fd);
+        kv_upload_abort(fd);
+        kv_resp_abort(fd);
         close(fd);
         return -1;
     }else if(set == 0){
         printf("fd: %d is diconnected\n",fd);
         memset(&connection[fd],0,sizeof(struct conn));
         cancel_event(fd);
+        kv_upload_abort(fd);
+        kv_resp_abort(fd);
         close(fd);
         return 0;
-    }else{
-        #if KV_COMPLEX
-        INFO("server send to clientd:( %s)   %d(bytes)\n",connection[fd].wbuffer,set);
-        connection[fd].wlength-=set;
-        INFO("wbuffer中还有多少数据：%d\n",connection[fd].wlength);
-        set_event(fd,EPOLLIN);
-        #elif 
-        set_event(fd,EPOLLIN);
-        #endif
     }
+
+    connection[fd].wlength-=set;
+    if(connection[fd].wlength>0){                 /* 本段没发完：挪走已发部分继续 */
+        memmove(connection[fd].wbuffer,connection[fd].wbuffer+set,connection[fd].wlength);
+        set_event(fd,EPOLLOUT);
+        return 0;
+    }
+
+    /* 本段发完：响应队列还有就继续拉 */
+    if(kv_resp_pending(fd)){
+        int n=kv_resp_next(fd,(uint8_t*)connection[fd].wbuffer,BUFFER_SIZE);
+        if(n>0){
+            connection[fd].wlength=n;
+            set_event(fd,EPOLLOUT);
+            return 0;
+        }
+    }
+
+    /* 队列空：处理 rbuffer 里残留的请求 */
+    if(connection[fd].rlength>0){
+        int cons_=0;
+        if(KV_server(fd,connection[fd].rbuffer,connection[fd].rlength,
+                     connection[fd].wbuffer,BUFFER_SIZE,&cons_,&connection[fd].wlength)<0){
+            cancel_event(fd);
+            kv_upload_abort(fd);
+            kv_resp_abort(fd);
+            close(fd);
+            return -1;
+        }
+        if(cons_<connection[fd].rlength){
+            memmove(connection[fd].rbuffer,connection[fd].rbuffer+cons_,
+                    connection[fd].rlength-cons_);
+        }
+        connection[fd].rlength-=cons_;
+        if(connection[fd].wlength>0){
+            set_event(fd,EPOLLOUT);
+            return 0;
+        }
+    }
+
+    set_event(fd,EPOLLIN);
+    return 0;
 }
 #if SYNC
 void notify(int fd){
@@ -316,6 +367,8 @@ int recv_from_slave_cb(int fd){
         cancel_event(fd);
         memset(&connection[fd],0,sizeof(struct conn));
         slave_close(mgr,fd);
+        kv_upload_abort(fd);
+        kv_resp_abort(fd);
         close(fd);
         return -1;
     }else if(ret == 0){
@@ -323,6 +376,8 @@ int recv_from_slave_cb(int fd){
         cancel_event(fd);
         memset(&connection[fd],0,sizeof(struct conn));
         slave_close(mgr,fd);
+        kv_upload_abort(fd);
+        kv_resp_abort(fd);
         close(fd);
         return 0;
     }else{
@@ -337,12 +392,16 @@ int recv_from_server_cb(int fd){
         perror("recv");
         cancel_event(fd);
         memset(&connection[fd],0,sizeof(struct conn));
+        kv_upload_abort(fd);
+        kv_resp_abort(fd);
         close(fd);
         return -1;
     }else if(ret == 0){
         INFO("fd: %d is diconnected\n",fd);
         cancel_event(fd);
         memset(&connection[fd],0,sizeof(struct conn));
+        kv_upload_abort(fd);
+        kv_resp_abort(fd);
         close(fd);
         return 0;
     }else{
