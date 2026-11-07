@@ -44,7 +44,7 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-
+   
     #if AOF
     ctx=aof_init("db_1","st_1");
     #endif

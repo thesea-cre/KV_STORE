@@ -67,6 +67,12 @@ CFLAGS:= 	-I../protocol \
 			-g -w -O2
 LDFLAGS:=   -L/home/snow/share/KV_STORE/lib/liburing/src -luring
 TARGET:= test
+# 从 kvstore.h 读取当前分配器，自动决定是否链接 jemalloc
+ALLOC := $(shell sed -n 's/^[[:space:]]*#define[[:space:]]*MALLOC[[:space:]]*\([A-Za-z0-9_]*\).*/\1/p' ../Core/kvstore.h)
+
+ifeq ($(ALLOC),JEMALLOC)
+LDFLAGS += -ljemalloc
+endif
 all: $(TARGET)
 $(TARGET): $(SRCS)
 	$(CC) -o $@ $(SRCS) $(CFLAGS) $(LDFLAGS)
